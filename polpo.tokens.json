@@ -1,0 +1,113 @@
+{
+  "name": "Polpo TUI Design System",
+  "version": "1.0.0",
+  "session_origin": 943,
+  "canonical_source": "[[TUI — Design System del Polpo]] (6 — Knowledge Library)",
+  "gold_standard": "dark #0a0f1a + teal #00d4aa (Tokyo Night Storm / Catppuccin Mocha family)",
+
+  "palette": {
+    "polpo_bg":        "#0a0f1a",
+    "polpo_bg_alt":    "#0f1623",
+    "polpo_teal":      "#00d4aa",
+    "polpo_teal_dim":  "#007a62",
+    "polpo_fg":        "#e6f1ff",
+    "polpo_dim":       "#6b7a8f",
+    "polpo_magenta":   "#ff00aa",
+    "polpo_yellow":    "#ffd400",
+    "polpo_green":     "#00ff88",
+    "polpo_cyan":      "#00d9ff",
+    "polpo_red":       "#ff3366",
+    "polpo_scar":      "#ff8800"
+  },
+
+  "semantic": {
+    "accent_primary":  "polpo_teal",
+    "status_ok":       "polpo_green",
+    "status_warn":     "polpo_yellow",
+    "status_error":    "polpo_red",
+    "status_scar":     "polpo_scar",
+    "text_body":       "polpo_fg",
+    "text_muted":      "polpo_dim",
+    "badge_info":      "polpo_cyan",
+    "badge_highlight": "polpo_magenta"
+  },
+
+  "spacing_cells": [0, 1, 2, 4, 8],
+
+  "typography": {
+    "font_primary":    "Berkeley Mono",
+    "font_fallback":   "JetBrains Mono Nerd Font",
+    "hierarchy":       "weight_bold + uppercase + accent_color",
+    "header_prefix":   "🐙 ",
+    "arrow_right":     "▶",
+    "bullet":          "•",
+    "status_glyphs":   { "ok": "●", "warn": "◐", "err": "○", "scar": "✦" }
+  },
+
+  "borders": {
+    "style_primary":   "heavy",
+    "chars_heavy":     { "tl": "┏", "tr": "┓", "bl": "┗", "br": "┛", "h": "━", "v": "┃" },
+    "chars_single":    { "tl": "┌", "tr": "┐", "bl": "└", "br": "┘", "h": "─", "v": "│" },
+    "chars_double":    { "tl": "╔", "tr": "╗", "bl": "╚", "br": "╝", "h": "═", "v": "║" }
+  },
+
+  "layout_canonical": {
+    "structure":       "Header(3) + Tabs(1) + [Sidebar collapsible 30 | Main flex] + StatusBar(1) + Footer(1)",
+    "breakpoints":     { "stack_vertical": 80, "sidebar_visible": 120 },
+    "fps_target":      12,
+    "fps_max":         15,
+    "note":            "60fps su SSH = UX morta. 10-15fps sufficiente."
+  },
+
+  "widgets_polpo": [
+    "PolpoHeader",
+    "PolpoStatusBar",
+    "PolpoTable",
+    "PolpoToast",
+    "PolpoSidebar",
+    "PolpoModal",
+    "PolpoCommandPalette",
+    "PolpoPanel",
+    "PolpoBadge",
+    "PolpoSpinner"
+  ],
+
+  "keybindings_canonical": {
+    "command_palette": "ctrl+k",
+    "refresh":         "r",
+    "quit":            "q",
+    "help":            "?",
+    "search":          "/",
+    "command_mode":    ":",
+    "next_tab":        "tab",
+    "prev_tab":        "shift+tab",
+    "vim_nav":         { "left": "h", "down": "j", "up": "k", "right": "l", "top": "gg", "bottom": "G" }
+  },
+
+  "polpo_patterns_embedded": [
+    "P1_cockpit_layout_canonical",
+    "P2_design_tokens_file",
+    "P3_command_palette_ctrl_k",
+    "P4_statusbar_multi_segment",
+    "P5_toast_queue_severity",
+    "P6_panel_widget_atomico",
+    "P7_async_loadingstate",
+    "P8_vim_keybinding_layer",
+    "P9_vhs_demo_gif",
+    "P10_messagebus_interno"
+  ],
+
+  "stack_decision": {
+    "ink":     { "fit": 9,  "use": "cockpit interno, React mental model, hot reload, stesso runtime Claude Code" },
+    "textual": { "fit": 10, "use": "dashboard data-heavy, asyncio, Plotext, Python ecosystem" },
+    "ratatui": { "fit": 3,  "use": "tool cliente distribuibile single-binary 5-10MB cross-platform" },
+    "note":    "Bubble Tea v2 (Go) = 4° stack candidato, da aggiungere come sub-template futuro (fit 5)"
+  },
+
+  "anti_patterns": [
+    "Electron + xterm.js: 200MB Chromium per buffer testuale (pre-mortem obbligatorio)",
+    "60fps su SSH: UX morta, tenere 10-15fps",
+    "time.sleep in Textual: blocca event loop, usa await asyncio.sleep",
+    "Ratatui immediate-mode senza memoization: flicker garantito"
+  ]
+}

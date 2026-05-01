@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
+from colorsys import hsv_to_rgb
 from pathlib import Path
 from statistics import mean, median
 
@@ -11,7 +12,8 @@ import psutil
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
-from textual.widgets import DataTable, Footer, Header, Static, TabbedContent, TabPane
+from textual.reactive import reactive
+from textual.widgets import DataTable, Footer, Static, TabbedContent, TabPane
 
 import data_sources as ds
 
@@ -324,6 +326,69 @@ def render_analytics(cpu_h: deque[float], mem_h: deque[float],
     return "\n".join(lines)
 
 
+# ── Rainbow title (HSV flow, light pastel) ─────────────────────────────────────
+RAINBOW_SAT     = 0.55   # 0=grey, 1=neon. 0.55 = leggero/pastel
+RAINBOW_VAL     = 1.00   # luminosità piena (uniforme su tutte le lettere)
+RAINBOW_SPREAD  = 0.07   # offset di hue tra una lettera e la successiva
+RAINBOW_SPEED   = 0.008  # incremento di phase per tick → 12.5s ciclo a 10fps
+RAINBOW_FPS_DT  = 0.10   # 100ms tick = 10fps (dentro polpo.tokens fps_target)
+
+
+def _rainbow_hex(idx: int, phase: float) -> str:
+    h = (idx * RAINBOW_SPREAD + phase) % 1.0
+    r, g, b = hsv_to_rgb(h, RAINBOW_SAT, RAINBOW_VAL)
+    return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+
+
+def rainbow_text(text: str, phase: float) -> str:
+    out = []
+    for i, ch in enumerate(text):
+        if ch.isspace():
+            out.append(ch)
+        else:
+            out.append(f"[{_rainbow_hex(i, phase)}]{ch}[/]")
+    return ''.join(out)
+
+
+class TitleBar(Static):
+    """Fascia titolo a 3 righe — emoji statica + titolo arcobaleno animato + status."""
+
+    DEFAULT_CSS = f"""
+    TitleBar {{
+        height: 5;
+        background: {BG};
+        padding: 1 3;
+        color: {FG};
+        border-bottom: heavy {TEAL};
+    }}
+    """
+
+    TITLE_TEXT = "M5 MAX WATCHER"
+    EMOJI      = "🐙"
+
+    phase:  reactive[float] = reactive(0.0)
+    status: reactive[str]   = reactive("")
+
+    def on_mount(self) -> None:
+        self.set_interval(RAINBOW_FPS_DT, self._tick)
+        self._render()
+
+    def _tick(self) -> None:
+        self.phase = (self.phase + RAINBOW_SPEED) % 1.0
+
+    def watch_phase(self, _new: float) -> None:
+        self._render()
+
+    def watch_status(self, _new: str) -> None:
+        self._render()
+
+    def _render(self) -> None:
+        rainbow = rainbow_text(self.TITLE_TEXT, self.phase)
+        line1 = f"{self.EMOJI}  [bold]{rainbow}[/]"
+        line2 = self.status if self.status else f"[{DIM}]Probing system…[/]"
+        self.update(f"{line1}\n\n{line2}")
+
+
 # ── App ────────────────────────────────────────────────────────────────────────
 class M5Watcher(App):
     TITLE     = "🐙 M5 MAX WATCHER"
@@ -407,14 +472,7 @@ class M5Watcher(App):
 
     # ── Layout ────────────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        with Horizontal(id="top-row"):
-            with ScrollableContainer(id="cpu-panel"):
-                yield Static(f"[bold {TEAL}]CPU — M5 Max 18C[/]\n[{DIM}]Probing…[/]",
-                             id="cpu-content")
-            with ScrollableContainer(id="mem-panel"):
-                yield Static(f"[bold {TEAL}]UNIFIED MEMORY 36GB[/]\n[{DIM}]Reading…[/]",
-                             id="mem-content")
+        yield TitleBar(id="title-bar")
         with TabbedContent(id="tab-area"):
             with TabPane("🌡 Heatmap", id="tab-heat"):
                 yield Static(f"[{DIM}]Accumulating core samples…[/]", id="heat-static")
@@ -424,6 +482,13 @@ class M5Watcher(App):
                 yield DataTable(id="proc-table", cursor_type="row", zebra_stripes=True)
             with TabPane("🐙 Tentacoli", id="tab-tent"):
                 yield DataTable(id="tent-table", cursor_type="row", zebra_stripes=True)
+        with Horizontal(id="top-row"):
+            with ScrollableContainer(id="cpu-panel"):
+                yield Static(f"[bold {TEAL}]CPU — M5 Max 18C[/]\n[{DIM}]Probing…[/]",
+                             id="cpu-content")
+            with ScrollableContainer(id="mem-panel"):
+                yield Static(f"[bold {TEAL}]UNIFIED MEMORY 36GB[/]\n[{DIM}]Reading…[/]",
+                             id="mem-content")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -517,13 +582,14 @@ class M5Watcher(App):
         pc   = {'ok': GREEN, 'info': TEAL, 'warning': YELLOW, 'error': RED}.get(prs[1], DIM)
         d, n = self._disk, self._net
         live = f'[{GREEN}]●[/]' if not self._paused else f'[{YELLOW}]‖[/]'
-        self.sub_title = (
+        status = (
             f"{live} bat {pct}%{icon}  "
             f"cpu {cpu:.0f}%  load {load:.1f}  "
             f"ram [{pc}]{prs[0]}[/]  "
             f"disk ↓{d.get('read', 0):.1f} ↑{d.get('write', 0):.1f}  "
             f"net ↓{n.get('recv', 0):.2f} ↑{n.get('sent', 0):.2f} MB/s"
         )
+        self.query_one("#title-bar", TitleBar).status = status
 
     # ── Actions ───────────────────────────────────────────────────────────────
     async def action_force_refresh(self) -> None:

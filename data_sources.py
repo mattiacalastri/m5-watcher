@@ -95,12 +95,19 @@ def tentacoli() -> list[dict]:
             if mi is None:
                 continue
             name_lc = p.info['name'].lower()
+            cmd = ' '.join(p.info.get('cmdline') or [])
+            cmd_lc = cmd.lower()
+            # Claude Code renames process to its version (es. '2.1.123') —
+            # extend search to cmdline so 🐙 claude tentacoli vengono visti.
+            haystack = name_lc + ' ' + cmd_lc
             for kw, emoji in POLPO_PROCS.items():
-                if kw in name_lc:
-                    cmd = ' '.join(p.info.get('cmdline') or [])
+                if kw in haystack:
+                    display_name = p.info['name']
+                    if kw == 'claude' and re.match(r'^\d+\.\d+\.\d+$', name_lc):
+                        display_name = f'claude {name_lc}'
                     found.append({
                         'pid': p.info['pid'], 'emoji': emoji,
-                        'name': p.info['name'][:22],
+                        'name': display_name[:22],
                         'cpu': p.info['cpu_percent'] or 0.0,
                         'mem_mb': mi.rss / 1024 / 1024,
                         'cmd': cmd[:55],

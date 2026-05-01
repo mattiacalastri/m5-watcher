@@ -371,18 +371,18 @@ class TitleBar(Static):
 
     def on_mount(self) -> None:
         self.set_interval(RAINBOW_FPS_DT, self._tick)
-        self._render()
+        self._repaint()
 
     def _tick(self) -> None:
         self.phase = (self.phase + RAINBOW_SPEED) % 1.0
 
     def watch_phase(self, _new: float) -> None:
-        self._render()
+        self._repaint()
 
     def watch_status(self, _new: str) -> None:
-        self._render()
+        self._repaint()
 
-    def _render(self) -> None:
+    def _repaint(self) -> None:
         rainbow = rainbow_text(self.TITLE_TEXT, self.phase)
         line1 = f"{self.EMOJI}  [bold]{rainbow}[/]"
         line2 = self.status if self.status else f"[{DIM}]Probing system…[/]"

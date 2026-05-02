@@ -63,6 +63,7 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.reactive import reactive
 from textual import events
 from textual.widgets import DataTable, Footer, Static, TabbedContent, TabPane
+from rich.text import Text as RichText
 
 import data_sources as ds
 import vault_parser
@@ -944,7 +945,7 @@ class M5Watcher(App):
     Tab {{
         color: {DIM};
         background: {BG};
-        padding: 0 3;
+        padding: 1 3;
         height: 1fr;
     }}
     Tab:hover {{
@@ -973,6 +974,7 @@ class M5Watcher(App):
         border: heavy {TEAL};
         padding: 1 2;
         height: 1fr;
+        overflow: hidden hidden;
     }}
     #analytics-static {{
         background: {BG_ALT};
@@ -1085,8 +1087,8 @@ class M5Watcher(App):
 
     # ── Responsive helpers ────────────────────────────────────────────────────
     def _heatmap_cols(self) -> int:
-        """Heatmap column count — scales with terminal width (53% panel, prefix ~12)."""
-        return max(20, int(self._cols * 0.51) - 12)
+        # 53% widget, border=2, padding=4, row overhead "  P00 " (6) + "  100%" (6) = 12 + 6 margins
+        return max(20, int(self._cols * 0.53) - 18)
 
     def _spark_width(self) -> int:
         """Sparkline width for analytics tab — full-width panel minus labels."""
@@ -1097,12 +1099,6 @@ class M5Watcher(App):
         return max(20, int(self._cols * 0.45) - 10)
 
     def _center_tabs(self) -> None:
-        """Center the Tabs bar horizontally by setting margin_left dynamically.
-
-        Textual 8.x Tabs (width:auto) places its first Tab at col 3 naturally;
-        the 5-tab block spans ~83 chars (centre at col 44).  We shift by
-        max(0, cols//2 - 45) so the block centres at cols/2.
-        """
         try:
             margin = max(0, self._cols // 2 - 45)
             self.query_one("Tabs").styles.margin = (0, 0, 0, margin)
@@ -1121,9 +1117,9 @@ class M5Watcher(App):
         # Compact TitleBar on very small terminals
         self.query_one("#title-bar").styles.height = 6 if self._rows < 35 else 8
         # Immediately re-render width-sensitive panels
-        self.query_one("#heat-static", Static).update(
-            render_heatmap(self._core_history, cols=self._heatmap_cols())
-        )
+        _heat_text = RichText.from_markup(render_heatmap(self._core_history, cols=self._heatmap_cols()))
+        _heat_text.no_wrap = True
+        self.query_one("#heat-static", Static).update(_heat_text)
         self._center_tabs()
 
     async def on_mount(self) -> None:
@@ -1166,9 +1162,9 @@ class M5Watcher(App):
             f"[bold {ELEC_BLUE}]⚡ CPU[/]  [{DIM}]· M5 Max 18C[/]\n" +
             render_cpu(self._cpu_percents, self._cpu_history, self._disk, self._net)
         )
-        self.query_one("#heat-static",   Static).update(
-            render_heatmap(self._core_history, cols=self._heatmap_cols())
-        )
+        _heat_text = RichText.from_markup(render_heatmap(self._core_history, cols=self._heatmap_cols()))
+        _heat_text.no_wrap = True
+        self.query_one("#heat-static", Static).update(_heat_text)
         self.query_one("#analytics-static", Static).update(
             render_analytics(self._cpu_history, self._mem_history,
                              self._core_history, overall, mem_now, la1,

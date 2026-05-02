@@ -165,3 +165,234 @@ def net_io_rate() -> dict[str, float]:
 
 def load_avg() -> tuple[float, float, float]:
     return psutil.getloadavg()
+
+
+# ── Polpo Process Triage ───────────────────────────────────────────────────────
+
+import time as _time
+
+BUCKET_SAFE     = 'KILL_SAFE'
+BUCKET_CAUTIOUS = 'CAUTIOUS'
+BUCKET_KEEP     = 'KEEP'
+
+# MCP servers — figli diretti di Claude Code (node/python)
+_MCP_PATTERNS: list[tuple[str, str]] = [
+    ('whatsapp-mcp-ts',    'WhatsApp MCP'),
+    ('whatsapp',           'WhatsApp MCP'),
+    ('hostinger-api-mcp',  'Hostinger MCP'),
+    ('context7-mcp',       'Context7 MCP'),
+    ('youtube-transcript', 'YouTube MCP'),
+    ('mcp-servers/ghl',    'GHL MCP'),
+    ('ghl/index.js',       'GHL MCP'),
+    ('telegram-mcp',       'Telegram MCP'),
+    ('stripe-mcp',         'Stripe MCP'),
+    ('firecrawl-mcp',      'Firecrawl MCP'),
+    ('sentry-mcp',         'Sentry MCP'),
+    ('figma',              'Figma MCP'),
+    ('supabase',           'Supabase MCP'),
+    ('obsidian-mcp',       'Obsidian MCP'),
+    ('cloudinary',         'Cloudinary MCP'),
+    ('fal-ai',             'fal.ai MCP'),
+    ('n8n-mcp',            'n8n MCP'),
+    ('railway-mcp',        'Railway MCP'),
+    ('windsor',            'Windsor MCP'),
+    ('linkedin-mcp',       'LinkedIn MCP'),
+    ('claude_ai_',         'Claude MCP bridge'),
+    ('fathom',             'Fathom MCP'),
+    ('obsidian',           'Obsidian MCP'),
+]
+
+# LaunchAgent daemons Polpo (parent = launchd PID 1)
+_LAUNCHAGENT_PATTERNS: list[tuple[str, str, str]] = [
+    ('polpo_sentinella',   'Polpo Sentinella',  'com.astra.polpo-sentinella'),
+    ('polpo_dream',        'Polpo Dream',        'com.astra.polpo-dream'),
+    ('voice_briefing',     'Voice Briefing',     'com.astra.polpo-voice'),
+    ('polpo_researcher',   'Researcher',         'com.astra.polpo-researcher'),
+    ('polpo_social',       'Polpo Social',       'com.astra.polpo-social'),
+    ('sollecitatore',      'Sollecitatore',      'com.astra.polpo-sollecitatore'),
+    ('kpi_updater',        'KPI Updater',        'com.astra.kpi-updater'),
+    ('session_claim',      'Session Claim',      'com.astra.session-sync'),
+    ('memory_backup',      'Memory Backup',      'com.astra.claude-memory-backup'),
+    ('daily_briefing',     'Daily Briefing',     'com.astra.daily-briefing'),
+    ('infra_healthcheck',  'Infra Health',       'com.astra.infra-healthcheck'),
+    ('sites_health',       'Sites Health',       'com.astra.sites-health'),
+    ('statusline',         'Statusline',         'com.astra.statusline'),
+    ('dream_sync',         'Dream Sync',         'com.astra.dream-sync'),
+    ('spore',              'Spore',              'com.astra.spore'),
+    ('garden_server',      'Garden Server',      'com.astra.garden-server'),
+    ('credential_health',  'Cred Health',        'com.astra.credential-health'),
+    ('security_push',      'Security Push',      'com.astra.security-push'),
+    ('pipeline_audit',     'Pipeline Audit',     'com.astra.pipeline-audit'),
+    ('outreach',           'Outreach Daemon',    'com.astra.outreach.daemon'),
+]
+
+
+def _parent_alive(ppid: int) -> bool:
+    try:
+        return psutil.Process(ppid).status() != 'zombie'
+    except psutil.NoSuchProcess:
+        return False
+
+
+def _child_count(pid: int) -> int:
+    try:
+        return len(psutil.Process(pid).children())
+    except psutil.NoSuchProcess:
+        return 0
+
+
+def _is_claude_code(name: str) -> bool:
+    return bool(re.match(r'^\d+\.\d+\.\d+$', name.lower()))
+
+
+def _match_mcp(haystack: str) -> str | None:
+    for pat, label in _MCP_PATTERNS:
+        if pat in haystack:
+            return label
+    return None
+
+
+def _match_launchagent(haystack: str) -> tuple[str, str] | None:
+    for pat, label, la_id in _LAUNCHAGENT_PATTERNS:
+        if pat in haystack:
+            return label, la_id
+    return None
+
+
+def triage_processes() -> list[dict]:
+    """Classifica processi Polpo in KILL_SAFE / CAUTIOUS / KEEP.
+
+    Ogni entry ha: pid, name, label, mem_mb, cpu, bucket, reason, kill_cmd, proc_type
+    """
+    results: list[dict] = []
+    seen: set[int] = set()
+    now = _time.time()
+
+    for p in psutil.process_iter([
+        'pid', 'ppid', 'name', 'status', 'cpu_percent',
+        'memory_info', 'cmdline', 'create_time', 'terminal',
+    ]):
+        try:
+            mi = p.info['memory_info']
+            if mi is None:
+                continue
+            pid     = p.info['pid']
+            ppid    = p.info['ppid']
+            name    = p.info['name']
+            name_lc = name.lower()
+            status  = p.info['status']
+            cmd     = ' '.join(p.info.get('cmdline') or [])
+            haystack = name_lc + ' ' + cmd.lower()
+            mem_mb  = mi.rss / 1024 / 1024
+            cpu     = p.info['cpu_percent'] or 0.0
+            has_tty = p.info.get('terminal') is not None
+            age_min = (now - (p.info['create_time'] or now)) / 60
+
+            if mem_mb < 30 or pid in seen:
+                continue
+
+            # ── Zombie ────────────────────────────────────────────
+            if status == 'zombie':
+                results.append({
+                    'pid': pid, 'name': name, 'label': 'ZOMBIE',
+                    'mem_mb': mem_mb, 'cpu': cpu,
+                    'bucket': BUCKET_SAFE,
+                    'reason': f'Zombie — parent {ppid} non ha fatto wait()',
+                    'kill_cmd': f'kill -9 {pid}',
+                    'proc_type': 'zombie',
+                })
+                seen.add(pid)
+                continue
+
+            # ── Claude Code session ────────────────────────────────
+            if _is_claude_code(name):
+                n_ch = _child_count(pid)
+                if has_tty:
+                    bucket = BUCKET_KEEP
+                    reason = 'Sessione interattiva con TTY attivo'
+                elif n_ch > 0:
+                    bucket = BUCKET_CAUTIOUS
+                    reason = f'Sessione con {n_ch} MCP figli vivi — chiudi da CLI'
+                else:
+                    bucket = BUCKET_CAUTIOUS
+                    reason = f'Sessione non interattiva, idle {age_min:.0f}min'
+                results.append({
+                    'pid': pid, 'name': name, 'label': f'Claude {name}',
+                    'mem_mb': mem_mb, 'cpu': cpu,
+                    'bucket': bucket, 'reason': reason,
+                    'kill_cmd': f'kill {pid}',
+                    'proc_type': 'claude_session',
+                })
+                seen.add(pid)
+                continue
+
+            # ── MCP server ─────────────────────────────────────────
+            mcp_label = _match_mcp(haystack)
+            is_mcp_node = (
+                mcp_label or
+                ('mcp' in haystack and name_lc in ('node', 'python', 'python3'))
+            )
+            if is_mcp_node:
+                label = mcp_label or 'MCP (unknown)'
+                if not _parent_alive(ppid):
+                    bucket = BUCKET_SAFE
+                    reason = f'Orfano — parent PID {ppid} non esiste più'
+                elif ppid == 1:
+                    # Parent è launchd: bridge standalone, non figlio di sessione Claude
+                    bucket = BUCKET_CAUTIOUS
+                    reason = 'MCP standalone (LaunchAgent) — non legato a sessione Claude'
+                else:
+                    try:
+                        parent_name = psutil.Process(ppid).name()
+                    except psutil.NoSuchProcess:
+                        parent_name = '?'
+                    bucket = BUCKET_KEEP
+                    reason = f'Parent PID {ppid} ({parent_name}) vivo'
+                results.append({
+                    'pid': pid, 'name': name, 'label': label,
+                    'mem_mb': mem_mb, 'cpu': cpu,
+                    'bucket': bucket, 'reason': reason,
+                    'kill_cmd': f'kill {pid}',
+                    'proc_type': 'mcp',
+                })
+                seen.add(pid)
+                continue
+
+            # ── LaunchAgent daemon ─────────────────────────────────
+            la_match = _match_launchagent(haystack)
+            if la_match or ('com.astra' in haystack) or ('polpo' in haystack and ppid == 1):
+                label, la_id = la_match or ('Polpo Daemon', 'com.astra.unknown')
+                results.append({
+                    'pid': pid, 'name': name, 'label': label,
+                    'mem_mb': mem_mb, 'cpu': cpu,
+                    'bucket': BUCKET_CAUTIOUS,
+                    'reason': f'LaunchAgent — meglio: launchctl stop {la_id}',
+                    'kill_cmd': f'launchctl stop {la_id}',
+                    'proc_type': 'launchagent',
+                })
+                seen.add(pid)
+                continue
+
+            # ── Ollama ─────────────────────────────────────────────
+            if 'ollama' in haystack:
+                bucket = BUCKET_CAUTIOUS if cpu < 1.0 else BUCKET_KEEP
+                reason = (
+                    f'LLM server idle — {mem_mb:.0f}MB, CPU {cpu:.1f}%'
+                    if cpu < 1.0 else
+                    f'LLM server in uso — CPU {cpu:.1f}%'
+                )
+                results.append({
+                    'pid': pid, 'name': name, 'label': 'Ollama',
+                    'mem_mb': mem_mb, 'cpu': cpu,
+                    'bucket': bucket, 'reason': reason,
+                    'kill_cmd': f'kill {pid}',
+                    'proc_type': 'llm',
+                })
+                seen.add(pid)
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
+    _order = {BUCKET_SAFE: 0, BUCKET_CAUTIOUS: 1, BUCKET_KEEP: 2}
+    results.sort(key=lambda x: (_order.get(x['bucket'], 3), -x['mem_mb']))
+    return results

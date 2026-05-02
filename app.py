@@ -62,6 +62,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 from textual import events
 from textual.widgets import DataTable, Footer, Static, TabbedContent, TabPane
 from rich.text import Text as RichText
@@ -904,6 +905,138 @@ class TitleBar(Static):
         self.update(f"{ascii_banner}{line1}\n{line2}\n{line3}\n{line4}")
 
 
+# ── Triage Screen ─────────────────────────────────────────────────────────────
+class TriageScreen(ModalScreen):
+    """Overlay advisor: classifica processi Polpo in KILL_SAFE / CAUTIOUS / KEEP."""
+
+    DEFAULT_CSS = """
+    TriageScreen {
+        align: center middle;
+    }
+    #triage-outer {
+        width: 96%;
+        height: 88%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #triage-title {
+        text-align: center;
+        margin-bottom: 1;
+    }
+    #triage-hint {
+        height: 1;
+        color: $text-muted;
+        text-align: center;
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape,q", "dismiss",      "Chiudi",   show=True),
+        Binding("k",        "kill_selected","Kill",     show=True),
+        Binding("r",        "do_refresh",   "Refresh",  show=True),
+    ]
+
+    _BUCKET_COLOR = {
+        ds.BUCKET_SAFE:     "bold red",
+        ds.BUCKET_CAUTIOUS: "bold yellow",
+        ds.BUCKET_KEEP:     "bold green",
+    }
+    _BUCKET_SHORT = {
+        ds.BUCKET_SAFE:     "SAFE",
+        ds.BUCKET_CAUTIOUS: "CAUTIOUS",
+        ds.BUCKET_KEEP:     "KEEP",
+    }
+
+    def compose(self) -> ComposeResult:
+        with ScrollableContainer(id="triage-outer"):
+            yield Static("", id="triage-title")
+            yield DataTable(id="triage-table", cursor_type="row", zebra_stripes=True)
+            yield Static("", id="triage-hint")
+
+    def on_mount(self) -> None:
+        t = self.query_one("#triage-table", DataTable)
+        t.add_columns(" ", "PID", "Label", "RAM MB", "CPU%", "Ragione")
+        self.query_one("#triage-title").update("[dim]⟳ Analizzando processi…[/]")
+        self.run_worker(self._load, exclusive=True)
+
+    async def _load(self) -> None:
+        self._procs = await asyncio.to_thread(ds.triage_processes)
+        self._render()
+
+    def _render(self) -> None:
+        procs = getattr(self, '_procs', [])
+        t = self.query_one("#triage-table", DataTable)
+        t.clear()
+
+        n_safe = sum(1 for p in procs if p['bucket'] == ds.BUCKET_SAFE)
+        n_caut = sum(1 for p in procs if p['bucket'] == ds.BUCKET_CAUTIOUS)
+        n_keep = sum(1 for p in procs if p['bucket'] == ds.BUCKET_KEEP)
+
+        self.query_one("#triage-title").update(
+            f"[bold]🔴 SAFE ×{n_safe}[/]   "
+            f"[bold yellow]🟡 CAUTIOUS ×{n_caut}[/]   "
+            f"[bold green]🟢 KEEP ×{n_keep}[/]   "
+            f"[dim]· {len(procs)} proc Polpo[/]"
+        )
+        self.query_one("#triage-hint").update(
+            "[dim]k[/] kill  ·  [dim]r[/] refresh  ·  [dim]esc[/] chiudi  "
+            "·  SAFE = orfani/zombie  ·  CAUTIOUS = attenzione  ·  KEEP = non toccare"
+        )
+
+        for proc in procs:
+            color = self._BUCKET_COLOR.get(proc['bucket'], 'dim')
+            short = self._BUCKET_SHORT.get(proc['bucket'], proc['bucket'])
+            t.add_row(
+                f"[{color}]{short}[/]",
+                str(proc['pid']),
+                proc['label'][:24],
+                f"{proc['mem_mb']:.0f}",
+                f"{proc['cpu']:.1f}",
+                proc['reason'][:56],
+                key=str(proc['pid']),
+            )
+
+    def action_kill_selected(self) -> None:
+        procs = getattr(self, '_procs', [])
+        t = self.query_one("#triage-table", DataTable)
+        if t.cursor_row is None or not procs:
+            return
+
+        try:
+            row = t.get_row_at(t.cursor_row)
+            pid = int(str(row[1]))
+        except (ValueError, IndexError):
+            return
+
+        proc = next((p for p in procs if p['pid'] == pid), None)
+        if not proc:
+            return
+
+        if proc['bucket'] == ds.BUCKET_KEEP:
+            self.notify(f"⛔ PID {pid} in KEEP — non killabile", severity="error", timeout=3)
+            return
+
+        import signal as _sig
+        try:
+            os.kill(pid, _sig.SIGTERM)
+            self.notify(
+                f"✓ SIGTERM → {proc['label']} (PID {pid})",
+                severity="information", timeout=2,
+            )
+        except ProcessLookupError:
+            self.notify(f"PID {pid} già morto", severity="warning", timeout=2)
+        except PermissionError:
+            self.notify(f"⛔ Permission denied su PID {pid}", severity="error", timeout=3)
+
+        self.run_worker(self._load, exclusive=True)
+
+    async def action_do_refresh(self) -> None:
+        self.query_one("#triage-title").update("[dim]⟳ Refreshing…[/]")
+        self.run_worker(self._load, exclusive=True)
+
+
 # ── App ────────────────────────────────────────────────────────────────────────
 class M5Watcher(App):
     """🐙 M5 MAX WATCHER · Astra Digital Marketing · Polpo Cockpit Suite
@@ -966,11 +1099,12 @@ class M5Watcher(App):
         background: {BG};
         height: 3;
         width: auto;
+        margin: 0 auto;
     }}
     Tab {{
         color: {DIM};
         background: {BG};
-        padding: 0 3 1 3;
+        padding: 1 3 1 3;
         height: 1fr;
     }}
     Tab:hover {{
@@ -1064,7 +1198,8 @@ class M5Watcher(App):
         Binding("4",   "show_tab_tent",  "Tentacoli", show=False),
         Binding("5",   "show_tab_graph", "Graph",     show=False),
         Binding("6",   "show_tab_kpi",   "KPI",       show=False),
-        Binding("f",   "cycle_graph_filter", "Filter", show=False),
+        Binding("f",   "cycle_graph_filter", "Filter",  show=False),
+        Binding("c",   "triage",             "Triage",  show=True),
     ]
 
     def __init__(self):
@@ -1152,11 +1287,7 @@ class M5Watcher(App):
         return max(20, int(self._cols * 0.45) - 10)
 
     def _center_tabs(self) -> None:
-        try:
-            margin = max(0, self._cols // 2 - 45)
-            self.query_one("Tabs").styles.margin = (0, 0, 0, margin)
-        except Exception:
-            pass
+        pass
 
     def on_resize(self, event: events.Resize) -> None:
         """Capture terminal size and adapt layout + panels immediately."""
@@ -1405,6 +1536,9 @@ class M5Watcher(App):
         self.query_one(TabbedContent).active = "tab-kpi"
         mrr = self._kpi_data.get('mrr', 0)
         self.notify(f"📊  KPI  ·  MRR €{int(mrr):,}".replace(',', '.'), timeout=1.5)
+
+    def action_triage(self) -> None:
+        self.push_screen(TriageScreen())
 
     def action_cycle_graph_filter(self) -> None:
         modes = graph_widget.FILTER_MODES

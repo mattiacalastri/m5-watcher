@@ -1,5 +1,35 @@
+# Python
 venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+
+# Env / secrets — NEVER commit
+.env
+.env.*
+*.key
+*.pem
+secrets.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
 .DS_Store
+.AppleDouble
+
+# Logs
+*.log
+
+# Python version managers
+.python-version

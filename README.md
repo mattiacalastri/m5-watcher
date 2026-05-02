@@ -1,7 +1,14 @@
 # 🐙 M5 Max Watcher
 
-> **Real-time analytics TUI for Apple M5 Max** — stream cores, memory, I/O,
-> tentacoli (Polpo background processes) in a beautiful terminal cockpit.
+> **Real-time terminal dashboard (TUI) for Apple M5 Max** — CPU per-core heatmap,
+> unified memory pressure, top processes, and Polpo background process map,
+> all in a beautiful Textual cockpit running natively on macOS Apple Silicon.
+
+![Python](https://img.shields.io/badge/python-3.11%2B-blue?logo=python&logoColor=white)
+![Textual](https://img.shields.io/badge/Textual-8.2.5-purple?logo=python&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-black?logo=apple&logoColor=white)
+![License](https://img.shields.io/badge/license-Proprietary-red)
+![Version](https://img.shields.io/badge/version-2.0.2-teal)
 
 **Version:** 2.0.2 · **Codename:** Polpo Data Viz Edition · **Released:** 2026-05-02
 **Author:** Mattia Calastri · **Company:** Astra Digital Marketing

@@ -1,0 +1,39 @@
+# M5 Max Watcher — LLM Context File
+# https://llmstxt.org — machine-readable project summary for AI assistants
+
+## Project
+Name: M5 Max Watcher
+Version: 2.0.2
+Description: Real-time terminal dashboard (TUI) for Apple M5 Max, built with Python Textual.
+License: Proprietary © 2026 Mattia Calastri · Astra Digital Marketing
+Repository: https://github.com/mattiacalastri/m5-watcher
+Author: Mattia Calastri <mattia@digitalastra.it>
+
+## What it does
+A Textual-based TUI that streams live observability data from Apple Silicon M5 Max:
+- CPU per-core utilisation (6 efficiency + 12 performance cores), with 88-second rolling heatmap
+- Unified memory breakdown: wired / active / inactive / compressed / free
+- Top processes by CPU and RAM
+- Tentacoli panel: maps Polpo background processes (Claude sessions, MCP servers, Jarvis voice daemon)
+- Polpo Voice panel: mirrors JarvisToggle.app — STT/TTS state, waveform, live transcriptions
+
+## Technology stack
+- Language: Python 3.11+
+- TUI framework: Textual >= 8.2.5
+- System metrics: psutil >= 6.0.0
+- Platform: macOS 15+ (Apple Silicon — M1/M2/M3/M4/M5 family)
+
+## Key files
+- app.py: main Textual application (single-file, 1200 LOC)
+- data_sources.py: psutil/sysctl wrappers, pure data layer (no sudo required)
+- polpo.tokens.json: Polpo Design System palette and TUI patterns
+- run.sh: launcher (activates venv, runs app.py)
+
+## Design system
+Energy palette: LIME #a8ff60, ELEC_BLUE #00e5ff, HOT_PINK #ff2d92, ORANGE #ff8a3d
+Rainbow wave TitleBar: WAVE_AMP=0.45 FREQ=0.32 SPEED=2.0 (Polpo visual identity)
+Health scoring: (100-cpu)*0.35 + (100-ram)*0.45 + (100-load/N)*0.20
+
+## Context
+Part of the Polpo Cockpit Suite — the operational nervous system of Mattia Calastri's AI agency workflow.
+Reference TUI architecture for all future Polpo terminal dashboards.

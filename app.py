@@ -1178,6 +1178,10 @@ class M5Watcher(App):
         self.query_one("#heat-static", Static).update(_heat_text)
         self._center_tabs()
 
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        is_graph = event.pane is not None and event.pane.id == "tab-graph"
+        self.query_one("#top-row").display = not is_graph
+
     async def on_mount(self) -> None:
         self._init_tables()
         self._center_tabs()

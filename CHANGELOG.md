@@ -5,6 +5,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 
 ---
 
+## [2.2.1] — 2026-05-03 · Graph Full-Screen Mode
+
+**Released sess.1376** — full-screen Graph tab: top-row hides automatically
+when Graph tab is active, maximizing vault visualization space.
+
+### Changed
+- **Graph tab full-screen** — `on_tabbed_content_tab_activated` handler hides
+  `#top-row` (CPU/MEM panels + titlebar) when Graph tab is active; restores on
+  any other tab switch. Zero layout jank, zero extra bindings needed.
+
+---
+
+## [2.2.0] — 2026-05-02 · KPI Tab + POLPO Rainbow Banner (sess.1346 · sess.1350)
+
+**Released sess.1350** — adds a business vitals KPI panel and the iconic POLPO
+ASCII rainbow banner in the titlebar.
+
+### Added
+- **📊 KPI tab** — business vitals panel v2.2.0: MRR, outstanding, pipeline
+  weighted, setter metrics, infra counts; reads live from `KPI.md` frontmatter
+- **POLPO ASCII art rainbow banner** — rendered in TitleBar with ansi colors;
+  fixes Tab top margin that was clipping the tab labels
+
+---
+
 ## [2.1.0] — 2026-05-02 · Knowledge Graph + Test Suite (sess.1279 · sess.1301 · sess.1302)
 
 **Released sess.1302** — adds Vault Intelligence Panel (Tab 5 🕸 Graph) and first

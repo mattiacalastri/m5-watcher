@@ -33,7 +33,7 @@ from __future__ import annotations
 
 # ── Metadata ──────────────────────────────────────────────────────────────────
 __title__        = "M5 Max Watcher"
-__version__      = "2.2.0"
+__version__      = "2.2.1"
 __release_date__ = "2026-05-02"
 __codename__     = "Polpo Data Viz Edition"
 __author__       = "Mattia Calastri"

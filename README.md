@@ -10,6 +10,12 @@
 ![License](https://img.shields.io/badge/license-Proprietary-red)
 ![Version](https://img.shields.io/badge/version-2.1.0-teal)
 
+<div align="center">
+
+![M5 Max Watcher — il Polpo che monitora](assets/hero.jpg)
+
+</div>
+
 **Version:** 2.1.0 · **Codename:** Polpo Data Viz Edition · **Released:** 2026-05-02
 **Author:** Mattia Calastri · **Company:** Astra Digital Marketing
 **Pillar:** Astra OS · Polpo Cockpit Suite · **Forged in:** sess.1238 · sess.1253 · sess.1269 · sess.1279 · sess.1301 · sess.1302

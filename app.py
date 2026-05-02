@@ -1192,8 +1192,10 @@ class M5Watcher(App):
 
         cpu_avg = mean(self._cpu_percents) if self._cpu_percents else 0
         la1, _, _ = ds.load_avg()
+        _mem_total_gb = self._mem.get('total', 0) / 1024 ** 3
+        _mem_gb_str = f"{_mem_total_gb:.0f}GB" if _mem_total_gb > 0 else "—GB"
         self.query_one("#mem-content", Static).update(
-            f"[bold {LIME}]🧠 UNIFIED MEMORY[/]  [{DIM}]· 36GB[/]\n" +
+            f"[bold {LIME}]🧠 UNIFIED MEMORY[/]  [{DIM}]· {_mem_gb_str}[/]\n" +
             render_mem(self._mem, self._mem_history, cpu_avg, la1)
         )
         await self._update_processes()

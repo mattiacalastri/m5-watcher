@@ -815,7 +815,6 @@ class TitleBar(Static):
         background: {BG};
         padding: 1 2;
         color: {FG};
-        border-top: heavy {TEAL};
         border-bottom: heavy {TEAL};
         text-align: center;
         content-align: center middle;
@@ -1074,7 +1073,7 @@ class M5Watcher(App):
         width: 1fr;
         border: heavy {TEAL};
         padding: 1 2;
-        margin: 0 1;
+        margin: 0;
         background: {BG_ALT};
     }}
     #cpu-panel {{
@@ -1093,12 +1092,12 @@ class M5Watcher(App):
         background: {BG};
     }}
     ContentSwitcher {{
-        border-top: tall {TEAL};
+        border-top: heavy {TEAL};
     }}
     Tabs {{
         background: {BG};
         height: 3;
-        width: auto;
+        width: 100%;
         margin: 0;
         padding: 0;
     }}
@@ -1114,16 +1113,16 @@ class M5Watcher(App):
     }}
     Tab.-active {{
         color: {TEAL};
-        background: #0a2a1e;
+        background: {BG_ALT};
         text-style: bold;
     }}
     Tab.-active:hover {{
         color: {TEAL};
-        background: #0d3325;
+        background: {BG_ALT};
     }}
     TabPane {{
         background: {BG};
-        padding: 0 0;
+        padding: 0;
     }}
     #heat-row {{
         height: 1fr;

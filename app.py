@@ -22,8 +22,9 @@ Tabs:
   🔝 Processes   — top 16 by CPU+RAM
   🐙 Tentacoli   — Polpo background processes (Claude/MCP/daemons)
   🕸 Graph       — Vault Intelligence Panel (Neural Density · Data Attractors · Topologia)
+  📊 KPI         — Business vitals (MRR · Outstanding · Pipeline · Setter)
 
-Keybindings: q quit · r refresh · p pause · 1-5 tab switch · f cycle graph filter
+Keybindings: q quit · r refresh · p pause · 1-6 tab switch · f cycle graph filter
 Zoom: bottom-right + / − buttons (delegate Cmd+/− to Ghostty)
 
 ================================================================================
@@ -32,7 +33,7 @@ from __future__ import annotations
 
 # ── Metadata ──────────────────────────────────────────────────────────────────
 __title__        = "M5 Max Watcher"
-__version__      = "2.1.0"
+__version__      = "2.2.0"
 __release_date__ = "2026-05-02"
 __codename__     = "Polpo Data Viz Edition"
 __author__       = "Mattia Calastri"
@@ -68,6 +69,7 @@ from rich.text import Text as RichText
 import data_sources as ds
 import vault_parser
 import graph_widget
+import kpi_widget
 
 # ── Design tokens ──────────────────────────────────────────────────────────────
 _TOKENS = json.loads((Path(__file__).parent / "polpo.tokens.json").read_text())
@@ -645,6 +647,14 @@ WAVE_AMP        = 0.45   # ampiezza dim oscillation (0=no wave, 1=max dim a met�
 WAVE_FREQ       = 0.32   # frequenza spaziale: ~3 lettere per ciclo, onda visibile
 WAVE_SPEED      = 2.0    # velocità di scorrimento dell'onda (× phase)
 
+_ASCII_POLPO = (
+    " ██████╗  ██████╗ ██╗      ██████╗  ██████╗ ",
+    " ██╔══██╗██╔═══██╗██║     ██╔══██╗██╔═══██╗",
+    " ██████╔╝██║   ██║██║     ██████╔╝██║   ██║",
+    " ██╔═══╝ ██║   ██║██║     ██╔═══╝ ██║   ██║",
+    " ██║     ╚██████╔╝███████╗██║     ╚██████╔╝",
+    " ╚═╝      ╚═════╝ ╚══════╝╚═╝      ╚═════╝ ",
+)
 
 def _rainbow_hex(idx: int, phase: float, wave: bool = True) -> str:
     """HSV rainbow + optional wave luminosity modulation per letter.
@@ -800,7 +810,7 @@ class TitleBar(Static):
 
     DEFAULT_CSS = f"""
     TitleBar {{
-        height: 8;
+        height: 15;
         background: {BG};
         padding: 1 2;
         color: {FG};
@@ -814,9 +824,10 @@ class TitleBar(Static):
     TITLE_TEXT = "M5 MAX WATCHER"
     EMOJI      = "🐙"
 
-    phase:     reactive[float] = reactive(0.0)
-    status:    reactive[str]   = reactive("")
-    rich_info: reactive[dict]  = reactive(dict)
+    phase:      reactive[float] = reactive(0.0)
+    status:     reactive[str]   = reactive("")
+    rich_info:  reactive[dict]  = reactive(dict)
+    show_ascii: reactive[bool]  = reactive(True)
 
     def on_mount(self) -> None:
         self.set_interval(RAINBOW_FPS_DT, self._tick)
@@ -834,7 +845,19 @@ class TitleBar(Static):
     def watch_rich_info(self, _new: dict) -> None:
         self._repaint()
 
+    def watch_show_ascii(self, _new: bool) -> None:
+        self._repaint()
+
     def _repaint(self) -> None:
+        if self.show_ascii:
+            ascii_rows = [
+                rainbow_text(row, (self.phase + i * 0.12) % 1.0, wave=True)
+                for i, row in enumerate(_ASCII_POLPO)
+            ]
+            ascii_banner = "\n".join(ascii_rows) + "\n"
+        else:
+            ascii_banner = ""
+
         rainbow = rainbow_text(self.TITLE_TEXT, self.phase, wave=True)
         line1 = (
             f"{self.EMOJI}  "
@@ -878,7 +901,7 @@ class TitleBar(Static):
             )
 
         line4 = self.status if self.status else f"[{DIM}]🔄 Probing system…[/]"
-        self.update(f"{line1}\n{line2}\n{line3}\n{line4}")
+        self.update(f"{ascii_banner}{line1}\n{line2}\n{line3}\n{line4}")
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
@@ -947,7 +970,7 @@ class M5Watcher(App):
     Tab {{
         color: {DIM};
         background: {BG};
-        padding: 1 3;
+        padding: 0 3 1 3;
         height: 1fr;
     }}
     Tab:hover {{
@@ -1008,6 +1031,13 @@ class M5Watcher(App):
     DataTable > .datatable--even-row {{
         background: {BG};
     }}
+    #kpi-static {{
+        background: {BG_ALT};
+        border: heavy {LIME};
+        border-title-color: {LIME};
+        padding: 1 2;
+        height: 1fr;
+    }}
     """
 
     BINDINGS = [
@@ -1019,6 +1049,7 @@ class M5Watcher(App):
         Binding("3",   "show_tab_procs", "Processes", show=False),
         Binding("4",   "show_tab_tent",  "Tentacoli", show=False),
         Binding("5",   "show_tab_graph", "Graph",     show=False),
+        Binding("6",   "show_tab_kpi",   "KPI",       show=False),
         Binding("f",   "cycle_graph_filter", "Filter", show=False),
     ]
 
@@ -1042,6 +1073,7 @@ class M5Watcher(App):
         self._boot_time   = psutil.boot_time()
         self._sess_n      = _claude_session_number()
         self._proc_counts = {'claude': 0, 'mcp': 0}
+        self._kpi_data:     dict                       = {}
         # Responsive layout — updated on terminal resize
         self._cols: int = 120
         self._rows: int = 40
@@ -1073,6 +1105,8 @@ class M5Watcher(App):
                     yield Static(
                         f"[{DIM}]🔄 Parsing vault Obsidian…[/]",
                         id="graph-static")
+            with TabPane("📊 KPI", id="tab-kpi"):
+                yield Static(f"[{DIM}]🔄 Leggendo KPI.md dal vault…[/]", id="kpi-static")
         with Horizontal(id="top-row"):
             with ScrollableContainer(id="cpu-panel"):
                 yield Static(
@@ -1117,8 +1151,11 @@ class M5Watcher(App):
         top_row = self.query_one("#top-row")
         top_row.styles.min_height = new_min
         top_row.styles.max_height = max(new_min + 6, 34)
-        # Compact TitleBar on very small terminals
-        self.query_one("#title-bar").styles.height = 6 if self._rows < 35 else 8
+        # Compact TitleBar: full=15 (ASCII banner visible), normal=8, mini=6
+        title_bar = self.query_one("#title-bar", TitleBar)
+        show = self._rows >= 35 and self._cols >= 52
+        title_bar.show_ascii = show
+        title_bar.styles.height = 6 if self._rows < 35 else (15 if show else 8)
         # Immediately re-render width-sensitive panels
         _heat_text = RichText.from_markup(render_heatmap(self._core_history, cols=self._heatmap_cols()))
         _heat_text.no_wrap = True
@@ -1181,11 +1218,12 @@ class M5Watcher(App):
     async def _refresh_slow(self) -> None:
         if self._paused:
             return
-        self._mem, self._bat, self._proc_counts, self._graph_data = await asyncio.gather(
+        self._mem, self._bat, self._proc_counts, self._graph_data, self._kpi_data = await asyncio.gather(
             asyncio.to_thread(ds.unified_memory),
             asyncio.to_thread(ds.battery),
             asyncio.to_thread(_count_claude_mcp),
             asyncio.to_thread(vault_parser.vault_graph_data),
+            asyncio.to_thread(kpi_widget.read_kpi_data),
         )
         self._mem_history.append(self._mem.get('pct', 0))
 
@@ -1200,6 +1238,9 @@ class M5Watcher(App):
         await self._update_processes()
         self.query_one("#graph-static", Static).update(
             graph_widget.render_graph(self._graph_data, filter_mode=self._graph_filter)
+        )
+        self.query_one("#kpi-static", Static).update(
+            kpi_widget.render_kpi(self._kpi_data)
         )
 
     async def _update_processes(self) -> None:
@@ -1339,6 +1380,11 @@ class M5Watcher(App):
     def action_show_tab_graph(self) -> None:
         self.query_one(TabbedContent).active = "tab-graph"
         self.notify(f"🕸  Graph  ·  filter: {self._graph_filter}", timeout=1.5)
+
+    def action_show_tab_kpi(self) -> None:
+        self.query_one(TabbedContent).active = "tab-kpi"
+        mrr = self._kpi_data.get('mrr', 0)
+        self.notify(f"📊  KPI  ·  MRR €{int(mrr):,}".replace(',', '.'), timeout=1.5)
 
     def action_cycle_graph_filter(self) -> None:
         modes = graph_widget.FILTER_MODES

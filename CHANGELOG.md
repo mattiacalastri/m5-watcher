@@ -5,6 +5,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 
 ---
 
+## [2.0.1] — 2026-05-02 · Philosophical voice + cleanup
+
+**Released sess.1238** — patch release. Adds Polpo philosophical-developer
+sub-headers in EN under each section, removes buggy ZoomControls widget
+(Cmd+/Cmd- native Ghostty kept), retires legacy `~/scripts/m5_watcher.py`.
+
+### Added
+- **Philosophical sub-headers** (italic DIM, one sentence each, EN voice):
+  - ⚡ CPU — *Where silicon thinks — six leaves of efficiency, twelve rockets of performance.*
+  - 🧠 Unified Memory — *One pool, no walls — Apple unified architecture observed as a single organism.*
+  - 🔥 Heatmap — *The memory of work, rendered as heat — time scrolls left, intensity blooms hot.*
+  - 📊 Analytics — *Where averages reveal the truth that instants hide — the slow drift behind every spike.*
+  - 🔝 Processes — *The hungriest first — when something feels wrong, the answer is usually here.*
+  - 🐙 Tentacoli — *The autonomic nervous system of the Polpo — Claude, MCP, daemons, watchdogs, alive.*
+- **Static headers** for Processes & Tentacoli tabs (previously DataTable only)
+
+### Removed
+- **`ZoomControls` widget** — buggy, didn't work as expected. Cmd+/Cmd-
+  native Ghostty zoom is the canonical UX (Mattia direct feedback)
+- Unused imports: `Vertical`, `Button`, `subprocess`
+
+### Infrastructure (out-of-tree, related)
+- Killed legacy `~/scripts/m5_watcher.py` (PID 770, 20h29m uptime)
+- Unloaded launchd `com.polpo.m5-watcher.plist` (kept respawning legacy)
+- Renamed plist → `.LEGACY` and script → `m5_watcher.LEGACY.py`
+- Only `com.polpo.m5-watcher-tui` (this v2.x project) remains active
+
+---
+
 ## [2.0.0] — 2026-05-02 · Polpo Data Viz Edition
 
 **Released sess.1238** — official version with energy palette + emoji semantics

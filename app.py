@@ -31,7 +31,7 @@ from __future__ import annotations
 
 # ── Metadata ──────────────────────────────────────────────────────────────────
 __title__        = "M5 Max Watcher"
-__version__      = "2.0.0"
+__version__      = "2.0.1"
 __release_date__ = "2026-05-02"
 __codename__     = "Polpo Data Viz Edition"
 __author__       = "Mattia Calastri"
@@ -49,7 +49,6 @@ import asyncio
 import json
 import math
 import os
-import subprocess
 import time
 from collections import deque
 from colorsys import hsv_to_rgb
@@ -59,9 +58,9 @@ from statistics import mean
 import psutil
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.containers import Horizontal, ScrollableContainer
 from textual.reactive import reactive
-from textual.widgets import Button, DataTable, Footer, Static, TabbedContent, TabPane
+from textual.widgets import DataTable, Footer, Static, TabbedContent, TabPane
 
 import data_sources as ds
 
@@ -315,6 +314,7 @@ def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str
     lines = [
         f"[bold {ORANGE}]🔥 CPU HEATMAP[/]  [{DIM}]Δt=2s · window={total_secs}s[/]  "
         f"[{DIM}]░[/]<25  [{CYAN}]▒[/]25-50  [{YELLOW}]▓[/]50-75  [{HOT_PINK}]█[/]>75",
+        f"[italic {DIM}]The memory of work, rendered as heat — time scrolls left, intensity blooms hot.[/]",
         f"[{DIM}]{axis_str}[/]  [{DIM}]avg[/]",
         f"  [{SOFT_GREEN}]🍃 S-CORES[/] [{DIM}](efficiency)[/]",
     ]
@@ -397,6 +397,7 @@ def render_analytics(cpu_h: deque[float], mem_h: deque[float],
 
     lines = [
         f"[bold {ELEC_BLUE}]📊 SYSTEM ANALYTICS[/]  [{DIM}]{len(cpu_h)} samples · {len(cpu_h)*2}s window[/]",
+        f"[italic {DIM}]Where averages reveal the truth that instants hide — the slow drift behind every spike.[/]",
         "",
         f"  [{hc}]{hs_bar}[/]  {h_emoji} [bold {hc}]HEALTH[/] [bold {WHITE}]{hs}[/][{DIM}]/100[/]",
         "",
@@ -574,62 +575,6 @@ def _claude_session_number() -> str:
         except OSError:
             continue
     return "—"
-
-
-class ZoomControls(Vertical):
-    """Toggle zoom Ghostty: 2 button verticali fissi bottom-right.
-    Click '+' o '-' invia Cmd+/Cmd- al terminal corrente via osascript.
-    Funziona perché Ghostty intercetta Cmd+/- come font-size-up/down nativi.
-    """
-
-    DEFAULT_CSS = f"""
-    ZoomControls {{
-        dock: right;
-        width: 5;
-        height: 6;
-        align: center bottom;
-        background: transparent;
-        layer: overlay;
-        offset: -1 -1;
-    }}
-    ZoomControls Button {{
-        width: 3;
-        height: 3;
-        min-width: 3;
-        margin: 0;
-        padding: 0;
-        background: {BG_ALT};
-        color: {TEAL};
-        border: heavy {TEAL};
-        text-style: bold;
-    }}
-    ZoomControls Button:hover {{
-        background: {TEAL};
-        color: {BG};
-        border: heavy {CYAN};
-    }}
-    ZoomControls Button.-active {{
-        background: {CYAN};
-        color: {BG};
-    }}
-    """
-
-    def compose(self) -> ComposeResult:
-        yield Button("+", id="zoom-in")
-        yield Button("−", id="zoom-out")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        key = "+" if event.button.id == "zoom-in" else "-"
-        try:
-            subprocess.Popen(
-                [
-                    "osascript", "-e",
-                    f'tell application "System Events" to keystroke "{key}" using command down'
-                ],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-        except OSError:
-            pass
 
 
 class TitleBar(Static):
@@ -822,17 +767,30 @@ class M5Watcher(App):
             with TabPane("📈 Analytics", id="tab-stats"):
                 yield Static(f"[{DIM}]Building statistics…[/]", id="analytics-static")
             with TabPane("🔝 Processes", id="tab-procs"):
+                yield Static(
+                    f"[bold {ELEC_BLUE}]🔝 TOP PROCESSES[/]  [{DIM}]· ranked by CPU + RAM[/]\n"
+                    f"[italic {DIM}]The hungriest first — when something feels wrong, the answer is usually here.[/]",
+                    id="procs-header")
                 yield DataTable(id="proc-table", cursor_type="row", zebra_stripes=True)
             with TabPane("🐙 Tentacoli", id="tab-tent"):
+                yield Static(
+                    f"[bold {HOT_PINK}]🐙 POLPO TENTACOLI[/]  [{DIM}]· background workers[/]\n"
+                    f"[italic {DIM}]The autonomic nervous system of the Polpo — Claude, MCP, daemons, watchdogs, alive.[/]",
+                    id="tent-header")
                 yield DataTable(id="tent-table", cursor_type="row", zebra_stripes=True)
         with Horizontal(id="top-row"):
             with ScrollableContainer(id="cpu-panel"):
-                yield Static(f"[bold {ELEC_BLUE}]⚡ CPU[/]  [{DIM}]· M5 Max 18C[/]\n[{DIM}]🔄 Probing…[/]",
-                             id="cpu-content")
+                yield Static(
+                    f"[bold {ELEC_BLUE}]⚡ CPU[/]  [{DIM}]· M5 Max 18C[/]\n"
+                    f"[italic {DIM}]Where silicon thinks — six leaves of efficiency, twelve rockets of performance.[/]\n"
+                    f"[{DIM}]🔄 Probing…[/]",
+                    id="cpu-content")
             with ScrollableContainer(id="mem-panel"):
-                yield Static(f"[bold {LIME}]🧠 UNIFIED MEMORY[/]  [{DIM}]· 36GB[/]\n[{DIM}]🔄 Reading…[/]",
-                             id="mem-content")
-        yield ZoomControls(id="zoom-controls")
+                yield Static(
+                    f"[bold {LIME}]🧠 UNIFIED MEMORY[/]  [{DIM}]· 36GB[/]\n"
+                    f"[italic {DIM}]One pool, no walls — Apple unified architecture observed as a single organism.[/]\n"
+                    f"[{DIM}]🔄 Reading…[/]",
+                    id="mem-content")
         yield Footer()
 
     async def on_mount(self) -> None:

@@ -3,9 +3,9 @@
 > **Real-time analytics TUI for Apple M5 Max** — stream cores, memory, I/O,
 > tentacoli (Polpo background processes) in a beautiful terminal cockpit.
 
-**Version:** 2.0.0 · **Codename:** Polpo Data Viz Edition · **Released:** 2026-05-02
+**Version:** 2.0.2 · **Codename:** Polpo Data Viz Edition · **Released:** 2026-05-02
 **Author:** Mattia Calastri · **Company:** Astra Digital Marketing
-**Pillar:** Astra OS · Polpo Cockpit Suite · **Forged in:** sess.1238
+**Pillar:** Astra OS · Polpo Cockpit Suite · **Forged in:** sess.1238 · sess.1253 · sess.1269
 
 ---
 
@@ -37,10 +37,13 @@ data from your Apple Silicon M5 Max:
 
 | Tab | Content |
 |---|---|
-| 🌡 Heatmap | Temporal core heatmap (S-cluster 🍃 + P-cluster 🚀) |
+| 🌡 Heatmap | Temporal core heatmap (S-cluster 🍃 + P-cluster 🚀) + **Polpo Voice panel** |
 | 📈 Analytics | Stats min/avg/p95/max + P/S ratio + 2-min sparklines |
 | 🔝 Processes | Top 16 by CPU + RAM |
 | 🐙 Tentacoli | Polpo background processes map |
+
+**Polpo Voice panel** (Heatmap tab, right column): mirrors JarvisToggle.app — OUT/IN/LOOP/DIALOG state pills,
+waveform sparkline from `stt_levels.bin`, active voice name, last 10 transcriptions.
 
 ## Keybindings
 
@@ -71,12 +74,20 @@ open -na Ghostty.app --args -e ~/projects/m5-watcher/run.sh
 
 ```
 m5-watcher/
-├── app.py               # main Textual app (TUI, render functions, ZoomControls)
+├── app.py               # main Textual app — TUI, all widgets, voice panel
 ├── data_sources.py      # psutil/sysctl wrappers — pure data layer
 ├── polpo.tokens.json    # Polpo Design System palette
 ├── requirements.txt     # textual + psutil pinned
 ├── run.sh               # launcher
 └── README.md            # this file
+
+# Polpo Voice data (runtime, read-only — written by Jarvis):
+~/.local/run/jarvis/
+├── stt_state            # current state: speaking / listening / idle
+├── stt_levels.bin       # float32 audio levels stream
+├── stt_history.jsonl    # transcription history (last N entries)
+├── voice_selected       # active voice id
+└── voices.json          # voice display names
 ```
 
 **Refresh cadence:**

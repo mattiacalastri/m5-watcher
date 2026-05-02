@@ -1038,6 +1038,20 @@ class M5Watcher(App):
         padding: 1 2;
         height: 1fr;
     }}
+    #procs-box {{
+        background: {BG_ALT};
+        border: heavy {ELEC_BLUE};
+        padding: 1 2;
+        height: 1fr;
+        overflow: hidden hidden;
+    }}
+    #tent-box {{
+        background: {BG_ALT};
+        border: heavy {HOT_PINK};
+        padding: 1 2;
+        height: 1fr;
+        overflow: hidden hidden;
+    }}
     """
 
     BINDINGS = [
@@ -1089,17 +1103,19 @@ class M5Watcher(App):
             with TabPane("📈 Analytics", id="tab-stats"):
                 yield Static(f"[{DIM}]Building statistics…[/]", id="analytics-static")
             with TabPane("🔝 Processes", id="tab-procs"):
-                yield Static(
-                    f"[bold {ELEC_BLUE}]🔝 TOP PROCESSES[/]  [{DIM}]· ranked by CPU + RAM[/]\n"
-                    f"[italic {DIM}]The hungriest first — when something feels wrong, the answer is usually here.[/]",
-                    id="procs-header")
-                yield DataTable(id="proc-table", cursor_type="row", zebra_stripes=True)
+                with ScrollableContainer(id="procs-box"):
+                    yield Static(
+                        f"[bold {ELEC_BLUE}]🔝 TOP PROCESSES[/]  [{DIM}]· ranked by CPU + RAM[/]\n"
+                        f"[italic {DIM}]The hungriest first — when something feels wrong, the answer is usually here.[/]",
+                        id="procs-header")
+                    yield DataTable(id="proc-table", cursor_type="row", zebra_stripes=True)
             with TabPane("🐙 Tentacoli", id="tab-tent"):
-                yield Static(
-                    f"[bold {HOT_PINK}]🐙 POLPO TENTACOLI[/]  [{DIM}]· background workers[/]\n"
-                    f"[italic {DIM}]The autonomic nervous system of the Polpo — Claude, MCP, daemons, watchdogs, alive.[/]",
-                    id="tent-header")
-                yield DataTable(id="tent-table", cursor_type="row", zebra_stripes=True)
+                with ScrollableContainer(id="tent-box"):
+                    yield Static(
+                        f"[bold {HOT_PINK}]🐙 POLPO TENTACOLI[/]  [{DIM}]· background workers[/]\n"
+                        f"[italic {DIM}]The autonomic nervous system of the Polpo — Claude, MCP, daemons, watchdogs, alive.[/]",
+                        id="tent-header")
+                    yield DataTable(id="tent-table", cursor_type="row", zebra_stripes=True)
             with TabPane("🕸 Graph", id="tab-graph"):
                 with ScrollableContainer(id="graph-scroll"):
                     yield Static(

@@ -1100,11 +1100,12 @@ class M5Watcher(App):
         height: 3;
         width: auto;
         margin: 0;
+        padding: 0;
     }}
     Tab {{
         color: {DIM};
         background: {BG};
-        padding: 1 3 1 3;
+        padding: 0 2;
         height: 1fr;
     }}
     Tab:hover {{

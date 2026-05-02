@@ -13,7 +13,7 @@ import networkx as nx
 _SEMANTIC_AREAS_PATH = Path(__file__).parent / "semantic_areas.json"
 
 _default_vault = (
-    Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Vault"
+    Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Astra Digital Marketing"
 )
 VAULT_PATH = Path(os.environ.get("M5_VAULT_PATH", str(_default_vault)))
 _WIKILINK  = re.compile(r'\[\[([^\[\]|#\n]+?)(?:[|#][^\[\]]*?)?\]\]')

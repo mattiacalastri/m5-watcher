@@ -32,16 +32,18 @@ def unified_memory() -> dict:
     inactive   = pages.get('Pages inactive', 0)
     compressed = pages.get('Pages stored in compressor', 0)
     free       = pages.get('Pages free', 0) + pages.get('Pages speculative', 0)
-    swap       = psutil.swap_memory().used
+    swap_info  = psutil.swap_memory()
+    swap       = swap_info.used
+    swap_pct   = swap / swap_info.total if swap_info.total > 0 else 0.0
 
     used = total - free
     pct  = used / total * 100
 
-    if free / total < 0.05:
+    if free / total < 0.05 or swap_pct > 0.90:
         pressure = ('CRITICAL', 'error')
-    elif free / total < 0.15:
+    elif free / total < 0.15 or swap_pct > 0.70:
         pressure = ('HIGH', 'warning')
-    elif free / total < 0.35:
+    elif free / total < 0.35 or swap_pct > 0.40:
         pressure = ('MODERATE', 'info')
     else:
         pressure = ('NORMAL', 'ok')

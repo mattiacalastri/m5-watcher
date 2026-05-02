@@ -117,18 +117,12 @@ def render_graph(
     neural_lines = [
         f"  [{ELEC_BLUE}]⚡ NEURAL DENSITY[/]  "
         f"[bold {nd_color}]{nd_score:3d}[/][{DIM}]/100[/]  "
-        f"[{nd_color}]{_bar(nd_score, 100, 30, nd_color)}[/]",
-        div,
-        f"  [{DIM}]Densità sinaptica  [/]{d_bar}  [{d_col}]{density:.4f}[/]  "
-        f"[{DIM}](link/possibili)[/]",
-        f"  [{DIM}]Clustering coeff.  [/]{c_bar}  [{c_col}]{clustering:.4f}[/]  "
-        f"[{DIM}](triadi chiuse)[/]",
-        f"  [{DIM}]Componente gigante [/]{g_bar}  [{g_col}]{giant * 100:.1f}%[/]   "
-        f"[{DIM}](note connesse)[/]",
-        f"  [{DIM}]Note isolate (inv) [/]{o_bar}  [{o_col}]{orphan_ratio * 100:.1f}%[/]   "
-        f"[{DIM}]orfane · grado medio [bold]{avg_degree:.1f}[/][/]",
-        f"  [{DIM}]Cluster:  {n_clusters}[/]"
-        f"   [{DIM}]Crescita 7gg: [/][bold {LIME}]+{recent_7d}[/]",
+        f"[{nd_color}]{_bar(nd_score, 100, 30, nd_color)}[/]  "
+        f"[{DIM}]Cluster:{n_clusters}[/]  [{LIME}]+{recent_7d}[/][{DIM}]/7gg[/]",
+        f"  [{DIM}]Sinapsi [/]{d_bar}[{DIM}]{density:.4f}[/]  "
+        f"[{DIM}]Cluster [/]{c_bar}[{c_col}]{clustering:.3f}[/]  "
+        f"[{DIM}]Giant [/]{g_bar}[{g_col}]{giant * 100:.0f}%[/]  "
+        f"[{DIM}]Deg.[bold]{avg_degree:.1f}[/][/]",
         "",
     ]
 

@@ -899,14 +899,17 @@ class M5Watcher(App):
         background: {BG};
         color: {FG};
     }}
-    #graph-static {{
+    #graph-scroll {{
         background: {BG_ALT};
         border: heavy {TEAL};
         border-title-color: {TEAL};
         border-title-style: bold;
         padding: 1 2;
         height: 1fr;
-        overflow: hidden auto;
+        overflow-y: auto;
+    }}
+    #graph-static {{
+        width: 1fr;
     }}
     #top-row {{
         height: auto;
@@ -1068,9 +1071,10 @@ class M5Watcher(App):
                     id="tent-header")
                 yield DataTable(id="tent-table", cursor_type="row", zebra_stripes=True)
             with TabPane("🕸 Graph", id="tab-graph"):
-                yield Static(
-                    f"[{DIM}]🔄 Parsing vault Obsidian…[/]",
-                    id="graph-static")
+                with ScrollableContainer(id="graph-scroll"):
+                    yield Static(
+                        f"[{DIM}]🔄 Parsing vault Obsidian…[/]",
+                        id="graph-static")
         with Horizontal(id="top-row"):
             with ScrollableContainer(id="cpu-panel"):
                 yield Static(

@@ -228,6 +228,7 @@ def render_cpu(percents: list[float], history: deque[float],
     h_emoji = health_emoji(hs)
 
     lines = [
+        "",
         # ── Health badge + overall bar
         f"  {h_emoji} [{hc}]HEALTH[/] [bold {WHITE}]{hs:3d}[/][{DIM}]/100[/]   "
         f"[{DIM}]⚖ load[/] [bold {TEAL}]{la1:.2f}[/] [{DIM}]{la5:.2f}  {la15:.2f}[/]",
@@ -289,6 +290,7 @@ def render_mem(m: dict, history: deque[float], cpu_avg: float, load: float) -> s
         return f"   {emoji} [{DIM}]{label:<10}[/] [{color}]{b}[/] [bold {color}]{gb(val):>7}[/]"
 
     return "\n".join([
+        "",
         f"  {h_emoji} [{hc}]HEALTH[/] [bold {WHITE}]{hs:3d}[/][{DIM}]/100[/]   "
         f"{prs_emoji} [{DIM}]pressure[/] [bold {prs_color}]{prs_label}[/]  "
         f"{swap_emoji} [{DIM}]swap[/] [bold {swap_color}]{gb(m['swap'])}[/]",
@@ -299,6 +301,7 @@ def render_mem(m: dict, history: deque[float], cpu_avg: float, load: float) -> s
         f"  {seg_labels}",
         "",
         f"  [{ELEC_BLUE}]🧠 BREAKDOWN[/]  [{DIM}]total[/] [bold {TEAL}]{gb(total)}[/]",
+        "",
         seg("🩷", "Wired",      m['wired'],      HOT_PINK),
         seg("🔷", "Active",     m['active'],     _c(m['active'] / total * 100)),
         seg("⚫", "Inactive",   m['inactive'],   DIM),
@@ -334,9 +337,11 @@ def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str
     axis_str = ''.join(axis_chars)
 
     lines = [
+        "",
         f"[bold {ORANGE}]🔥 CPU HEATMAP[/]  [{DIM}]Δt=2s · window={total_secs}s[/]  "
         f"[{DIM}]░[/]<25  [{CYAN}]▒[/]25-50  [{YELLOW}]▓[/]50-75  [{HOT_PINK}]█[/]>75",
         f"[italic {DIM}]The memory of work, rendered as heat — time scrolls left, intensity blooms hot.[/]",
+        "",
         f"[{DIM}]{axis_str}[/]  [{DIM}]avg[/]",
         f"  [{SOFT_GREEN}]🍃 S-CORES[/] [{DIM}](efficiency)[/]",
     ]
@@ -419,12 +424,14 @@ def render_analytics(cpu_h: deque[float], mem_h: deque[float],
         ratio_txt = f"{note_emoji} [bold {ELEC_BLUE}]{ratio:.2f}×[/] [{DIM}]({note})[/]  [{ELEC_BLUE}]{ratio_bar}[/]"
 
     lines = [
+        "",
         f"[bold {ELEC_BLUE}]📊 SYSTEM ANALYTICS[/]  [{DIM}]{len(cpu_h)} samples · {len(cpu_h)*2}s window[/]",
         f"[italic {DIM}]Where averages reveal the truth that instants hide — the slow drift behind every spike.[/]",
         "",
         f"  [{hc}]{hs_bar}[/]  {h_emoji} [bold {hc}]HEALTH[/] [bold {WHITE}]{hs}[/][{DIM}]/100[/]",
         "",
         f"  [{DIM}]━━ STATISTICS     min    avg    p95    max   trend[/]",
+        "",
         stat_row("⚡", "Overall CPU",     cpu_h),
     ]
     if e_dq: lines.append(stat_row("🍃", "S-cluster (6E)",  e_dq))
@@ -433,11 +440,14 @@ def render_analytics(cpu_h: deque[float], mem_h: deque[float],
     lines += [
         "",
         f"  [{DEEP_PURPL}]━━ P/S EFFICIENCY RATIO[/]",
+        "",
         f"   {ratio_txt}",
         "",
         f"  [{ORANGE}]━━ 2-MIN TIMELINE[/]",
+        "",
         f"  [{_c(cpu_now)}]{sparkline(cpu_h, spark_w)}[/]  ⚡ [{DIM}]cpu[/]",
         f"  [{_c(mem_now)}]{sparkline(mem_h, spark_w)}[/]  🧠 [{DIM}]ram[/]",
+        "",
     ]
     return "\n".join(lines)
 
@@ -813,7 +823,7 @@ class TitleBar(Static):
     TitleBar {{
         height: 15;
         background: {BG};
-        padding: 1 2;
+        padding: 1 3;
         color: {FG};
         border-bottom: heavy {TEAL};
         text-align: center;
@@ -917,7 +927,7 @@ class TriageScreen(ModalScreen):
         height: 88%;
         border: thick $accent;
         background: $surface;
-        padding: 1 2;
+        padding: 1 3;
     }
     #triage-title {
         text-align: center;
@@ -1057,7 +1067,7 @@ class M5Watcher(App):
         border: heavy {TEAL};
         border-title-color: {TEAL};
         border-title-style: bold;
-        padding: 1 2;
+        padding: 1 3;
         height: 1fr;
         overflow-y: auto;
     }}
@@ -1072,7 +1082,7 @@ class M5Watcher(App):
     #cpu-panel, #mem-panel {{
         width: 1fr;
         border: heavy {TEAL};
-        padding: 1 2;
+        padding: 1 3;
         margin: 0;
         background: {BG_ALT};
     }}
@@ -1104,7 +1114,7 @@ class M5Watcher(App):
     Tab {{
         color: {DIM};
         background: {BG};
-        padding: 0 2;
+        padding: 0 3;
         height: 1fr;
     }}
     Tab:hover {{
@@ -1131,14 +1141,14 @@ class M5Watcher(App):
         width: 53%;
         background: {BG_ALT};
         border: heavy {TEAL};
-        padding: 1 2;
+        padding: 1 3;
         height: 1fr;
         overflow: hidden hidden;
     }}
     #analytics-static {{
         background: {BG_ALT};
         border: heavy {TEAL};
-        padding: 1 2;
+        padding: 1 3;
         height: 1fr;
     }}
     #voice-static {{
@@ -1146,7 +1156,7 @@ class M5Watcher(App):
         background: {BG_ALT};
         border: heavy {HOT_PINK};
         border-title-color: {HOT_PINK};
-        padding: 1 2;
+        padding: 1 3;
         height: 1fr;
     }}
     DataTable {{
@@ -1169,20 +1179,20 @@ class M5Watcher(App):
         background: {BG_ALT};
         border: heavy {LIME};
         border-title-color: {LIME};
-        padding: 1 2;
+        padding: 1 3;
         height: 1fr;
     }}
     #procs-box {{
         background: {BG_ALT};
         border: heavy {ELEC_BLUE};
-        padding: 1 2;
+        padding: 1 3;
         height: 1fr;
         overflow: hidden hidden;
     }}
     #tent-box {{
         background: {BG_ALT};
         border: heavy {HOT_PINK};
-        padding: 1 2;
+        padding: 1 3;
         height: 1fr;
         overflow: hidden hidden;
     }}
@@ -1275,16 +1285,16 @@ class M5Watcher(App):
 
     # ── Responsive helpers ────────────────────────────────────────────────────
     def _heatmap_cols(self) -> int:
-        # 53% widget, border=2, padding=4, row overhead "  P00 " (6) + "  100%" (6) = 12 + 6 margins
-        return max(20, int(self._cols * 0.53) - 18)
+        # 53% widget, border=2, padding=6, row overhead "  P00 " (6) + "  100%" (6) = 14 + 6 margins
+        return max(20, int(self._cols * 0.53) - 20)
 
     def _spark_width(self) -> int:
         """Sparkline width for analytics tab — full-width panel minus labels."""
-        return max(20, self._cols - 22)
+        return max(20, self._cols - 24)
 
     def _voice_width(self) -> int:
         """Level bar width for voice panel — 47% panel minus padding/prefix."""
-        return max(20, int(self._cols * 0.45) - 10)
+        return max(20, int(self._cols * 0.45) - 12)
 
     def _center_tabs(self) -> None:
         pass

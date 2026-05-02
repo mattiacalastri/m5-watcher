@@ -115,10 +115,12 @@ def render_graph(
     nd_color = LIME if nd_score >= 65 else (TEAL if nd_score >= 40 else ORANGE)
 
     neural_lines = [
+        "",
         f"  [{ELEC_BLUE}]⚡ NEURAL DENSITY[/]  "
         f"[bold {nd_color}]{nd_score:3d}[/][{DIM}]/100[/]  "
         f"[{nd_color}]{_bar(nd_score, 100, 30, nd_color)}[/]  "
         f"[{DIM}]Cluster:{n_clusters}[/]  [{LIME}]+{recent_7d}[/][{DIM}]/7gg[/]",
+        "",
         f"  [{DIM}]Sinapsi [/]{d_bar}[{DIM}]{density:.4f}[/]  "
         f"[{DIM}]Cluster [/]{c_bar}[{c_col}]{clustering:.3f}[/]  "
         f"[{DIM}]Giant [/]{g_bar}[{g_col}]{giant * 100:.0f}%[/]  "
@@ -145,9 +147,11 @@ def render_graph(
         )
 
     attractor_lines = [
+        "",
         f"  [{ELEC_BLUE}]🧠 DATA ATTRACTORS[/]  "
         f"[{DIM}](in-degree · out-degree · betweenness centrality)[/]",
         div,
+        "",
         *[attractor_row(*row) for row in top_ind[:8]],
         "",
     ]
@@ -165,8 +169,10 @@ def render_graph(
         )
 
     status_lines = [
+        "",
         f"  [{ELEC_BLUE}]📊 STATO VAULT[/]",
         div,
+        "",
         sd_row("seed",      "seed",      LIME),
         sd_row("growing",   "growing",   TEAL),
         sd_row("evergreen", "evergreen", ELEC_BLUE),
@@ -237,8 +243,10 @@ def render_graph(
     ] or [f"  [{DIM}]nessuna modifica oggi[/]"]
 
     recent_lines = [
+        "",
         f"  [{ELEC_BLUE}]🕐 MODIFICATE OGGI[/]  [{DIM}]· {recent_7d} negli ultimi 7gg[/]",
         div,
+        "",
         *recent_rows,
         "",
     ]
@@ -258,11 +266,14 @@ def render_graph(
     ]
 
     conn_lines = [
+        "",
         f"  [{ELEC_BLUE}]🕸 TOPOLOGIA[/]",
         div,
+        "",
         f"  [{ORANGE}]Bridge (betweenness):[/]  {bridge_str}",
         "",
         f"  [{TEAL}]Cluster principali:[/]",
+        "",
         *cluster_rows,
     ]
 

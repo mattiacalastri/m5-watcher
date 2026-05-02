@@ -109,6 +109,7 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
         ]
 
     lines: list[str] = [
+        "",
         f"  [bold {WHITE}]📊 BUSINESS KPI[/]  [{DIM}]· Astra Digital Marketing · {updated}[/]",
         "",
     ]

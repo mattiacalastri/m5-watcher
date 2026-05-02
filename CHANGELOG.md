@@ -5,6 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 
 ---
 
+## [2.0.2] — 2026-05-02 · Polpo Voice Panel (sess.1253 + sess.1269)
+
+**Released sess.1269** — integrates the Polpo Voice system as a native Textual panel,
+making M5 Max Watcher the canonical reference TUI architecture for all future Polpo cockpit panels.
+
+### Added
+- **Polpo Voice panel** — mirrors JarvisToggle.app layout in Textual markup:
+  - Header: `🐙 Polpo · Voice` with device info (mic + speaker)
+  - State pills: `OUT` (active/idle) · `IN` (active/idle) · `LOOP` (on/off) · `DIALOG` (mode)
+  - Audio waveform: HOT_PINK sparkline from `stt_levels.bin` float32 stream
+  - "VOCE DEL POLPO" section: active voice name + star accent (dynamically read from `voices.json`)
+  - Recent transcriptions: last 10 entries from `stt_history.jsonl` with relative timestamps
+- **`voice_data()` data source** — reads `~/.local/run/jarvis/stt_history.jsonl`,
+  `stt_levels.bin`, `stt_state`, `voice_selected`; safe no-op when Jarvis offline
+- **Dynamic voice name** — reads `voices.json` for display name with fallback to hardcoded dict
+- **Tab centering** — all 4 tabs (Heatmap · Analytics · Processes · Tentacoli) center-aligned
+- **Active tab highlight** — active tab in `ELEC_BLUE bold`, inactive in dim
+
+### Fixed
+- `stt_state` pill logic: corrected state values (`speaking`/`listening`/`idle`) for
+  accurate OUT/IN/LOOP status rendering
+
+---
+
 ## [2.0.1] — 2026-05-02 · Philosophical voice + cleanup
 
 **Released sess.1238** — patch release. Adds Polpo philosophical-developer

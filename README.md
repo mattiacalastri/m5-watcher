@@ -8,11 +8,11 @@
 ![Textual](https://img.shields.io/badge/Textual-8.2.5-purple?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-black?logo=apple&logoColor=white)
 ![License](https://img.shields.io/badge/license-Proprietary-red)
-![Version](https://img.shields.io/badge/version-2.0.2-teal)
+![Version](https://img.shields.io/badge/version-2.1.0-teal)
 
-**Version:** 2.0.2 · **Codename:** Polpo Data Viz Edition · **Released:** 2026-05-02
+**Version:** 2.1.0 · **Codename:** Polpo Data Viz Edition · **Released:** 2026-05-02
 **Author:** Mattia Calastri · **Company:** Astra Digital Marketing
-**Pillar:** Astra OS · Polpo Cockpit Suite · **Forged in:** sess.1238 · sess.1253 · sess.1269
+**Pillar:** Astra OS · Polpo Cockpit Suite · **Forged in:** sess.1238 · sess.1253 · sess.1269 · sess.1279 · sess.1301 · sess.1302
 
 ---
 
@@ -48,6 +48,7 @@ data from your Apple Silicon M5 Max:
 | 📈 Analytics | Stats min/avg/p95/max + P/S ratio + 2-min sparklines |
 | 🔝 Processes | Top 16 by CPU + RAM |
 | 🐙 Tentacoli | Polpo background processes map |
+| 🕸 Graph | Vault Intelligence Panel — Neural Density cockpit, Data Attractors, Topologia |
 
 **Polpo Voice panel** (Heatmap tab, right column): mirrors JarvisToggle.app — OUT/IN/LOOP/DIALOG state pills,
 waveform sparkline from `stt_levels.bin`, active voice name, last 10 transcriptions.
@@ -59,7 +60,8 @@ waveform sparkline from `stt_levels.bin`, active voice name, last 10 transcripti
 | `q` | Quit |
 | `r` | Force refresh |
 | `p` | Toggle pause |
-| `1` `2` `3` `4` | Switch tab (Heatmap / Analytics / Processes / Tentacoli) |
+| `1` `2` `3` `4` `5` | Switch tab (Heatmap / Analytics / Processes / Tentacoli / Graph) |
+| `f` | Cycle graph filter (all / moc / orphan) |
 | Click `+` `−` (bottom-right) | Zoom Ghostty terminal (delegates `Cmd+`/`Cmd-`) |
 
 ## Installation
@@ -81,10 +83,13 @@ open -na Ghostty.app --args -e ~/projects/m5-watcher/run.sh
 
 ```
 m5-watcher/
-├── app.py               # main Textual app — TUI, all widgets, voice panel
+├── app.py               # main Textual app — TUI, all widgets, voice panel, Tab 5
 ├── data_sources.py      # psutil/sysctl wrappers — pure data layer
+├── vault_parser.py      # wikilink extractor → NetworkX DiGraph + Neural Density
+├── graph_widget.py      # Vault Intelligence Panel renderer (Rich markup)
+├── test_suite.py        # 64-test comprehensive suite (all modules)
 ├── polpo.tokens.json    # Polpo Design System palette
-├── requirements.txt     # textual + psutil pinned
+├── requirements.txt     # textual + psutil + networkx pinned
 ├── run.sh               # launcher
 └── README.md            # this file
 
@@ -95,14 +100,29 @@ m5-watcher/
 ├── stt_history.jsonl    # transcription history (last N entries)
 ├── voice_selected       # active voice id
 └── voices.json          # voice display names
+
+# Obsidian vault (runtime, read-only — for Tab 5 🕸 Graph):
+~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Astra Digital Marketing/
+                         # vault_parser.py scans *.md recursively, cache TTL 60s
 ```
 
 **Refresh cadence:**
 - Fast (2s): per-core CPU, history, heatmap, analytics, header status
-- Slow (5s): unified memory, battery, top processes, tentacoli, claude+mcp count
+- Slow (5s): unified memory, battery, top processes, tentacoli, claude+mcp count, vault graph
 
 **Data sources:** `data_sources.py` pure wrapper around `psutil` + `sysctl`,
-no async I/O, can be tested headless.
+no async I/O. `vault_parser.py` runs via `asyncio.to_thread` (non-blocking).
+
+## Tests
+
+```bash
+cd ~/projects/m5-watcher
+venv/bin/python test_suite.py
+```
+
+64 tests across 9 classes — covers syntax, deps, all data sources, all renderers,
+vault_parser (live + error path), graph_widget (all filter modes), headless Textual
+compose + tab switch 1-5 + pause toggle.
 
 ## Visual language
 

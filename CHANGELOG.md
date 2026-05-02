@@ -5,6 +5,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 
 ---
 
+## [2.1.0] — 2026-05-02 · Knowledge Graph + Test Suite (sess.1279 · sess.1301 · sess.1302)
+
+**Released sess.1302** — adds Vault Intelligence Panel (Tab 5 🕸 Graph) and first
+comprehensive test suite (64 tests) covering all modules including vault_parser and graph_widget.
+
+### Added
+- **Tab 5 🕸 Graph — Vault Intelligence Panel** (two-phase delivery):
+  - *Phase 1 (sess.1279, commit a61e99c)*: base panel with dot-plot ASCII layout,
+    filter modes (all / moc / orphan), keybinding `5` + `f` to cycle filters
+  - *Phase 2 (sess.1301, commit 405046c)*: full Neural Density cockpit —
+    ⚡ Neural Density score (0-100, formula: density×0.30 + clustering×0.25 + giant_ratio×0.25 + connectivity×0.20),
+    🧠 Data Attractors (top-10 in-degree with betweenness centrality profile),
+    📊 Stato Vault (seed / growing / evergreen / stub frontmatter distribution),
+    🕐 Modificate Oggi (recent activity + 7-day growth count),
+    🕸 Topologia (bridge nodes + cluster map)
+- **`vault_parser.py`** — wikilink extractor → NetworkX DiGraph + Neural Density metrics.
+  Two-pass (stat-only Pass 1 + read Pass 2), cache TTL 60s, TOP_N=120, betweenness k=30.
+  Live vault at release: 3190 note · 13413 link · 24 MOC · 233 orphan · ND 69/100
+- **`graph_widget.py`** — Vault Intelligence Panel renderer (Rich markup, Polpo palette,
+  `_ND_LOW=0.0003` / `_ND_MID=0.001` / `_ND_HIGH=0.002` thresholds)
+- **`test_suite.py`** (sess.1302, commit 267fce9) — 64-test comprehensive suite:
+  TestSyntax · TestDeps · TestUtilities · TestDataSources · TestRenderers ·
+  TestInternals · TestVaultParser · TestGraphWidget · TestHeadlessTextual.
+  Covers py_compile, all imports, all data sources (async-safe with `asyncio.run`),
+  all renderers, vault_parser live + error path, graph_widget all filter modes + error path,
+  headless Textual compose + tab switch 1-5 + pause toggle.
+
+### Changed
+- `_refresh_slow()` extended with `asyncio.to_thread(vault_parser.vault_graph_data)` (5s, non-blocking)
+- Keybinding docstring updated: `1-5 tab switch · f cycle graph filter`
+
+---
+
 ## [2.0.2] — 2026-05-02 · Polpo Voice Panel (sess.1253 + sess.1269)
 
 **Released sess.1269** — integrates the Polpo Voice system as a native Textual panel,

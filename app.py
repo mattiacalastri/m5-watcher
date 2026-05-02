@@ -21,8 +21,9 @@ Tabs:
   📈 Analytics   — min/avg/p95/max + P/S efficiency ratio + 2-min sparkline
   🔝 Processes   — top 16 by CPU+RAM
   🐙 Tentacoli   — Polpo background processes (Claude/MCP/daemons)
+  🕸 Graph       — Vault Intelligence Panel (Neural Density · Data Attractors · Topologia)
 
-Keybindings: q quit · r refresh · p pause · 1-4 tab switch
+Keybindings: q quit · r refresh · p pause · 1-5 tab switch · f cycle graph filter
 Zoom: bottom-right + / − buttons (delegate Cmd+/− to Ghostty)
 
 ================================================================================
@@ -31,7 +32,7 @@ from __future__ import annotations
 
 # ── Metadata ──────────────────────────────────────────────────────────────────
 __title__        = "M5 Max Watcher"
-__version__      = "2.0.2"
+__version__      = "2.1.0"
 __release_date__ = "2026-05-02"
 __codename__     = "Polpo Data Viz Edition"
 __author__       = "Mattia Calastri"

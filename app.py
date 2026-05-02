@@ -482,16 +482,28 @@ def voice_data() -> dict:
     except OSError:
         pass
 
+    # Full voice name from voices.json (overrides hardcoded dict if available)
+    voice_full = ""
+    try:
+        vj = json.loads((JARVIS_DIR / "voices.json").read_text(errors="ignore"))
+        for v in vj.get("voices", []):
+            if v.get("key", "").lower() == voice.lower():
+                voice_full = v.get("name", "")
+                break
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+
     return {
-        "state":     state,
-        "engine":    engine,
-        "voice":     voice,
-        "autosend":  autosend,
-        "loop":      loop,
-        "threshold": diag.get("threshold", "—"),
-        "ambient":   diag.get("cal_mean", "—"),
-        "history":   history,
-        "levels":    levels,
+        "state":      state,
+        "engine":     engine,
+        "voice":      voice,
+        "voice_full": voice_full,
+        "autosend":   autosend,
+        "loop":       loop,
+        "threshold":  diag.get("threshold", "—"),
+        "ambient":    diag.get("cal_mean", "—"),
+        "history":    history,
+        "levels":     levels,
     }
 
 
@@ -546,7 +558,7 @@ def render_voice(vd: dict) -> str:
     loop_label = loop_st.title() if loop_st not in ("off", "") else "Manual"
     wave_line  = _level_bar(levels, 40)
 
-    voice_display = _VOICE_NAMES.get(voice.lower(), voice.title())
+    voice_display = vd.get("voice_full") or _VOICE_NAMES.get(voice.lower(), voice.title())
     voice_star = f"⭐ [bold {ELEC_BLUE}]{voice_display}[/]"
 
     # Transcriptions with relative timestamps

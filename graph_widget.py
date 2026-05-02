@@ -1,4 +1,4 @@
-"""Knowledge Graph canvas renderer — Rich markup string, Polpo palette."""
+"""Vault Intelligence Panel — Neural Density cockpit. Polpo palette. Rich markup."""
 from __future__ import annotations
 
 import json
@@ -7,47 +7,42 @@ from typing import Optional
 
 import networkx as nx
 
-# ── Polpo palette (same source as app.py) ─────────────────────────────────────
-_P = json.loads((Path(__file__).parent / "polpo.tokens.json").read_text())["palette"]
-TEAL      = _P["polpo_teal"]       # #00d4aa — MOC nodes
-DIM       = _P["polpo_dim"]        # #6b7a8f — orphans + edges
-FG        = _P["polpo_fg"]         # #e6f1ff — normal nodes
+_P        = json.loads((Path(__file__).parent / "polpo.tokens.json").read_text())["palette"]
+TEAL      = _P["polpo_teal"]       # #00d4aa
+DIM       = _P["polpo_dim"]        # #6b7a8f
+FG        = _P["polpo_fg"]         # #e6f1ff
 WHITE     = "#ffffff"
-HOT_PINK  = "#ff2d92"              # focused node
-ELEC_BLUE = "#00e5ff"              # hub nodes (degree >= 15)
+HOT_PINK  = "#ff2d92"
+ELEC_BLUE = "#00e5ff"
 LIME      = "#a8ff60"
 ORANGE    = "#ff8a3d"
+DEEP_PURPL = "#9d4dff"
+SOFT_GREEN = "#5dffaa"
 
-FILTER_MODES = ("all", "moc", "orphan")
+FILTER_MODES    = ("all", "moc", "orphan")
+MAX_FOCUS_NODES = 40
+CANVAS_W        = 90
+CANVAS_H        = 28
 
-# Canvas size — fits standard 220-col terminal at comfortable zoom
-CANVAS_W = 90
-CANVAS_H = 28
-
-
-def _bresenham(x0: int, y0: int, x1: int, y1: int):
-    """Yield (x, y) for each step of a Bresenham line."""
-    dx = abs(x1 - x0); dy = abs(y1 - y0)
-    sx = 1 if x1 > x0 else -1
-    sy = 1 if y1 > y0 else -1
-    err = dx - dy
-    while True:
-        yield x0, y0
-        if x0 == x1 and y0 == y1:
-            break
-        e2 = 2 * err
-        if e2 > -dy:
-            err -= dy; x0 += sx
-        if e2 < dx:
-            err += dx; y0 += sy
+# Neural density gauge thresholds (realistic for large knowledge graphs ~3k notes)
+_ND_LOW  = 0.0003   # very sparse
+_ND_MID  = 0.001    # moderate
+_ND_HIGH = 0.002    # dense
 
 
-def _canvas_xy(raw_xy, w: int, h: int) -> tuple[int, int]:
-    """Map spring_layout [-1,1] coordinates to canvas (col, row)."""
-    x, y = float(raw_xy[0]), float(raw_xy[1])
-    col = int((x + 1) / 2 * (w - 6)) + 3
-    row = int((y + 1) / 2 * (h - 4)) + 2
-    return max(0, min(w - 1, col)), max(0, min(h - 1, row))
+def _bar(val: float, total: float, w: int = 20, color: str = LIME) -> str:
+    """Proportional filled bar."""
+    filled = min(w, round(val / max(total, 1e-9) * w))
+    return f'[{color}]{"█" * filled}[/][{DIM}]{"░" * (w - filled)}[/]'
+
+
+def _gauge(val: float, lo: float, hi: float, w: int = 24) -> tuple[str, str]:
+    """Linear gauge mapped to [lo, hi]. Returns (bar_markup, color)."""
+    norm  = max(0.0, min(1.0, (val - lo) / max(hi - lo, 1e-9)))
+    color = LIME if norm >= 0.65 else (TEAL if norm >= 0.35 else ORANGE)
+    filled = round(norm * w)
+    bar = f'[{color}]{"█" * filled}[/][{DIM}]{"░" * (w - filled)}[/]'
+    return bar, color
 
 
 def render_graph(
@@ -57,142 +52,185 @@ def render_graph(
     filter_mode: str = "all",
     focus_node: Optional[str] = None,
 ) -> str:
-    """Return Rich markup string — full graph panel ready for Static.update()."""
+    """Vault Intelligence Panel — Neural Density cockpit. Full Rich markup string."""
 
     if "error" in gdata:
         return (
-            f"[bold {ELEC_BLUE}]🕸 KNOWLEDGE GRAPH[/]\n\n"
+            f"[bold {ELEC_BLUE}]🕸 VAULT INTELLIGENCE[/]\n\n"
             f"  [{ORANGE}]⚠ {gdata['error']}[/]\n\n"
-            f"  [{DIM}]Vault path: ~/Library/Mobile Documents/iCloud~md~obsidian/[/]\n"
+            f"  [{DIM}]Vault: ~/Library/Mobile Documents/iCloud~md~obsidian/[/]\n"
             f"  [{DIM}]Assicurati che Obsidian sia sincronizzato.[/]"
         )
 
-    if not gdata.get("pos"):
+    stats = gdata.get("stats", {})
+    intel = gdata.get("intel", {})
+
+    if not stats or not intel:
         return (
-            f"[bold {ELEC_BLUE}]🕸 KNOWLEDGE GRAPH[/]\n\n"
-            f"  [{DIM}]🔄 Parsing vault…[/]"
+            f"[bold {ELEC_BLUE}]🕸 VAULT INTELLIGENCE[/]\n\n"
+            f"  [{DIM}]🔄 Calcolo Neural Density in corso…[/]\n"
+            f"  [{DIM}]Prima esecuzione: ~5-10s (parsing {stats.get('total', '?')} note)[/]"
         )
 
-    G: nx.DiGraph = gdata["graph"]
-    pos: dict     = gdata["pos"]
-    stats: dict   = gdata.get("stats", {})
+    total   = stats.get("total",   0)
+    edges   = stats.get("edges",   0)
+    mocs    = stats.get("mocs",    0)
+    orphans = stats.get("orphans", 0)
 
-    # ── Filter visible set ────────────────────────────────────────────────────
-    if filter_mode == "moc":
-        visible = {n for n in pos if G.nodes[n].get("type") == "moc"}
-    elif filter_mode == "orphan":
-        visible = {n for n in pos if G.nodes[n].get("type") == "orphan"}
-    else:
-        visible = set(pos.keys())
+    density    = intel.get("density",     0.0)
+    clustering = intel.get("clustering",  0.0)
+    avg_degree = intel.get("avg_degree",  0.0)
+    giant      = intel.get("giant_ratio", 0.0)
+    n_clusters = intel.get("n_clusters",  0)
+    recent_7d  = intel.get("recent_7d",   0)
 
-    # ── Framebuffer: list[list[(char, color|None)]] ───────────────────────────
-    buf: list[list[tuple[str, str | None]]] = [[(" ", None)] * w for _ in range(h)]
-
-    def put(x: int, y: int, ch: str, col: str | None) -> None:
-        if 0 <= x < w and 0 <= y < h:
-            buf[y][x] = (ch, col)
-
-    # ── Draw edges (cap at 300 for perf) ─────────────────────────────────────
-    drawn = 0
-    for src, dst in G.edges():
-        if drawn >= 300:
-            break
-        if src not in visible or dst not in visible:
-            continue
-        if src not in pos or dst not in pos:
-            continue
-        x0, y0 = _canvas_xy(pos[src], w, h)
-        x1, y1 = _canvas_xy(pos[dst], w, h)
-        for bx, by in _bresenham(x0, y0, x1, y1):
-            if buf[by][bx][0] == " ":
-                put(bx, by, "·", DIM)
-        drawn += 1
-
-    # ── Draw nodes (low-degree first so hubs render on top) ───────────────────
-    for node in sorted(visible, key=lambda n: G.degree(n)):
-        if node not in pos:
-            continue
-        x, y   = _canvas_xy(pos[node], w, h)
-        ntype  = G.nodes[node].get("type", "normal")
-        deg    = G.degree(node)
-
-        if node == focus_node:
-            color, glyph = HOT_PINK, "◉"
-        elif ntype == "moc":
-            color, glyph = TEAL, "◆"
-        elif deg >= 15:
-            color, glyph = ELEC_BLUE, "●"
-        elif ntype == "orphan":
-            color, glyph = DIM, "○"
-        else:
-            color, glyph = FG, "●"
-
-        put(x, y, glyph, color)
-
-        # Label: hubs + MOC only (keeps canvas readable)
-        if deg >= 8 or ntype == "moc":
-            label = node[:15]
-            for i, ch in enumerate(label):
-                lx = x + 1 + i
-                if lx < w and buf[y][lx][0] == " ":
-                    put(lx, y, ch, color)
-
-    # ── Render framebuffer → Rich markup ──────────────────────────────────────
-    canvas_lines: list[str] = []
-    for row in buf:
-        parts: list[str] = []
-        i = 0
-        while i < len(row):
-            ch, col = row[i]
-            if col:
-                # Merge consecutive same-color chars for shorter markup
-                j = i + 1
-                run = ch
-                while j < len(row) and row[j][1] == col:
-                    run += row[j][0]
-                    j += 1
-                parts.append(f"[{col}]{run}[/]")
-                i = j
-            else:
-                # Collect plain whitespace
-                j = i + 1
-                run = ch
-                while j < len(row) and row[j][1] is None:
-                    run += row[j][0]
-                    j += 1
-                parts.append(run)
-                i = j
-        canvas_lines.append("".join(parts))
-
-    # ── Header ────────────────────────────────────────────────────────────────
-    n_total  = stats.get("total", "?")
-    n_edges  = stats.get("edges", "?")
-    n_mocs   = stats.get("mocs", 0)
-    n_orphan = stats.get("orphans", 0)
-    n_vis    = len(visible)
+    orphan_ratio = orphans / max(total, 1)
 
     sep = f"  [{DIM}]·[/]  "
+
+    # ── Header ────────────────────────────────────────────────────────────────
     header = (
-        f"[bold {TEAL}]🕸 KNOWLEDGE GRAPH[/]"
-        f"{sep}[{DIM}]{n_total} note[/]"
-        f"{sep}[{DIM}]{n_edges} link[/]"
-        f"{sep}[{TEAL}]◆ {n_mocs} MOC[/]"
-        f"{sep}[{DIM}]{n_orphan} orphan[/]"
-        f"{sep}[{ELEC_BLUE}]● {n_vis} visible[/]"
+        f"[bold {TEAL}]🕸 VAULT INTELLIGENCE[/]"
+        f"{sep}[{DIM}]{total} note[/]"
+        f"{sep}[{DIM}]{edges} link[/]"
+        f"{sep}[{TEAL}]◆ {mocs} MOC[/]"
+        f"{sep}[{DIM}]{orphans} orphan[/]"
     )
 
-    filter_tabs = "   ".join(
+    div = f"  [{DIM}]{'─' * 82}[/]"
+
+    # ── Neural Density gauges ─────────────────────────────────────────────────
+    d_bar, d_col  = _gauge(density,    _ND_LOW, _ND_HIGH)
+    c_bar, c_col  = _gauge(clustering, 0.0, 0.35)
+    g_bar, g_col  = _gauge(giant,      0.3, 0.9)
+    o_bar, o_col  = _gauge(1 - orphan_ratio, 0.3, 0.9)  # inverse: more connected = better
+
+    nd_score = int((
+        (density / _ND_HIGH) * 0.30 +
+        clustering * 0.25 +
+        giant * 0.25 +
+        (1 - orphan_ratio) * 0.20
+    ) * 100)
+    nd_score = min(100, nd_score)
+    nd_color = LIME if nd_score >= 65 else (TEAL if nd_score >= 40 else ORANGE)
+
+    neural_lines = [
+        f"  [{ELEC_BLUE}]⚡ NEURAL DENSITY[/]  "
+        f"[bold {nd_color}]{nd_score:3d}[/][{DIM}]/100[/]  "
+        f"[{nd_color}]{_bar(nd_score, 100, 30, nd_color)}[/]",
+        div,
+        f"  [{DIM}]Densità sinaptica  [/]{d_bar}  [{d_col}]{density:.4f}[/]  "
+        f"[{DIM}](link/possibili)[/]",
+        f"  [{DIM}]Clustering coeff.  [/]{c_bar}  [{c_col}]{clustering:.4f}[/]  "
+        f"[{DIM}](triadi chiuse)[/]",
+        f"  [{DIM}]Componente gigante [/]{g_bar}  [{g_col}]{giant * 100:.1f}%[/]   "
+        f"[{DIM}](note connesse)[/]",
+        f"  [{DIM}]Note isolate (inv) [/]{o_bar}  [{o_col}]{orphan_ratio * 100:.1f}%[/]   "
+        f"[{DIM}]orfane · grado medio [bold]{avg_degree:.1f}[/][/]",
+        f"  [{DIM}]Cluster:  {n_clusters}[/]"
+        f"   [{DIM}]Crescita 7gg: [/][bold {LIME}]+{recent_7d}[/]",
+        "",
+    ]
+
+    # ── Data Attractors ───────────────────────────────────────────────────────
+    top_ind = intel.get("top_indegree", [])
+    max_ind = top_ind[0][1] if top_ind else 1
+
+    def attractor_row(name: str, in_d: int, out_d: int, ntype: str, bet: float) -> str:
+        glyph = "◆" if ntype == "moc" else "●"
+        color = TEAL if ntype == "moc" else (ELEC_BLUE if in_d >= 40 else FG)
+        label = name[:26]
+        bar26 = _bar(in_d, max_ind, 22, color)
+        bet_str = f"[{ORANGE}]{bet:.3f}[/]" if bet > 0.01 else f"[{DIM}]{bet:.3f}[/]"
+        return (
+            f"  [{color}]{glyph}[/] [{color}]{label:<26}[/] "
+            f"{bar26} "
+            f"[{DIM}]↑[/][bold {color}]{in_d:>4}[/]"
+            f"[{DIM}] ↓{out_d:<3}[/]  "
+            f"[{DIM}]btw[/] {bet_str}"
+        )
+
+    attractor_lines = [
+        f"  [{ELEC_BLUE}]🧠 DATA ATTRACTORS[/]  "
+        f"[{DIM}](in-degree · out-degree · betweenness centrality)[/]",
+        div,
+        *[attractor_row(*row) for row in top_ind[:8]],
+        "",
+    ]
+
+    # ── Status distribution ───────────────────────────────────────────────────
+    sd       = intel.get("status_dist", {})
+    sd_total = sum(sd.values()) or 1
+
+    def sd_row(label: str, key: str, color: str) -> str:
+        n = sd.get(key, 0)
+        return (
+            f"  [{color}]{label:<10}[/] "
+            f"{_bar(n, sd_total, 16, color)} "
+            f"[{DIM}]{n:>5}[/]"
+        )
+
+    status_lines = [
+        f"  [{ELEC_BLUE}]📊 STATO VAULT[/]",
+        div,
+        sd_row("seed",      "seed",      LIME),
+        sd_row("growing",   "growing",   TEAL),
+        sd_row("evergreen", "evergreen", ELEC_BLUE),
+        sd_row("stub",      "stub",      DIM),
+        "",
+    ]
+
+    # ── Recent activity ───────────────────────────────────────────────────────
+    recent_today = intel.get("recent_today", [])
+    recent_rows  = [
+        f"  [{DIM}]{t}[/]  [{FG}]{n[:42]}[/]"
+        for n, t in recent_today[:6]
+    ] or [f"  [{DIM}]nessuna modifica oggi[/]"]
+
+    recent_lines = [
+        f"  [{ELEC_BLUE}]🕐 MODIFICATE OGGI[/]  [{DIM}]· {recent_7d} negli ultimi 7gg[/]",
+        div,
+        *recent_rows,
+        "",
+    ]
+
+    # ── Bridge nodes + clusters ───────────────────────────────────────────────
+    top_bridges = intel.get("top_bridges",  [])
+    top_clusters = intel.get("top_clusters", [])
+
+    bridge_str = "   ".join(
+        f"[{ORANGE}]{n[:18]}[/][{DIM}]({s:.3f})[/]"
+        for n, s in top_bridges[:4]
+    ) or f"[{DIM}]—[/]"
+
+    cluster_rows = [
+        f"  [{DIM}]{i + 1}.[/] [{TEAL}]{hub[:30]}[/]  [{DIM}]{size} note[/]"
+        for i, (hub, size) in enumerate(top_clusters[:4])
+    ]
+
+    conn_lines = [
+        f"  [{ELEC_BLUE}]🕸 TOPOLOGIA[/]",
+        div,
+        f"  [{ORANGE}]Bridge (betweenness):[/]  {bridge_str}",
+        "",
+        f"  [{TEAL}]Cluster principali:[/]",
+        *cluster_rows,
+    ]
+
+    # ── Filter hint ───────────────────────────────────────────────────────────
+    filter_tabs = "  ".join(
         f"[bold {TEAL}][{m}][/]" if m == filter_mode else f"[{DIM}][{m}][/]"
         for m in FILTER_MODES
     )
-    legend = (
-        f"  [{TEAL}]◆ MOC[/]"
-        f"  [{ELEC_BLUE}]● hub(≥15)[/]"
-        f"  [{FG}]● note[/]"
-        f"  [{DIM}]○ orphan[/]"
-        f"  [{DIM}]· link[/]"
-        f"      {filter_tabs}"
-        f"    [{DIM}]f filter · r refresh[/]"
-    )
+    footer = f"  [{DIM}]f filter · r refresh[/]    {filter_tabs}"
 
-    return "\n".join([header, legend, *canvas_lines])
+    return "\n".join([
+        header, "",
+        *neural_lines,
+        *attractor_lines,
+        *status_lines,
+        *recent_lines,
+        *conn_lines,
+        "",
+        footer,
+    ])

@@ -906,6 +906,7 @@ class M5Watcher(App):
         border-title-style: bold;
         padding: 1 2;
         height: 1fr;
+        overflow: hidden auto;
     }}
     #top-row {{
         height: auto;

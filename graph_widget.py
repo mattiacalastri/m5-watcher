@@ -282,9 +282,9 @@ def render_graph(
     return "\n".join([
         header, "",
         *neural_lines,
+        *area_lines,
         *attractor_lines,
         *status_lines,
-        *area_lines,
         *recent_lines,
         *conn_lines,
         "",

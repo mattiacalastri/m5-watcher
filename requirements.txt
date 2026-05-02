@@ -6,3 +6,5 @@
 textual>=8.2.5,<9.0.0   # TUI framework — tested on 8.2.5
 psutil>=6.0.0,<8.0.0    # process & system metrics — tested on 7.2.2
 plotext>=5.3.2,<6.0.0   # ASCII plotting (reserved for future analytics extensions)
+networkx>=3.3,<4.0      # graph layout — Fruchterman-Reingold spring_layout for 🕸 Graph tab
+numpy>=1.24,<3.0        # required by networkx spring_layout

@@ -63,6 +63,8 @@ from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Static, TabbedContent, TabPane
 
 import data_sources as ds
+import vault_parser
+import graph_widget
 
 # ── Design tokens ──────────────────────────────────────────────────────────────
 _TOKENS = json.loads((Path(__file__).parent / "polpo.tokens.json").read_text())
@@ -879,6 +881,14 @@ class M5Watcher(App):
         background: {BG};
         color: {FG};
     }}
+    #graph-static {{
+        background: {BG_ALT};
+        border: heavy {TEAL};
+        border-title-color: {TEAL};
+        border-title-style: bold;
+        padding: 1 2;
+        height: 1fr;
+    }}
     #top-row {{
         height: auto;
         min-height: 26;
@@ -983,6 +993,8 @@ class M5Watcher(App):
         Binding("2",   "show_tab_stats", "Analytics", show=False),
         Binding("3",   "show_tab_procs", "Processes", show=False),
         Binding("4",   "show_tab_tent",  "Tentacoli", show=False),
+        Binding("5",   "show_tab_graph", "Graph",     show=False),
+        Binding("f",   "cycle_graph_filter", "Filter", show=False),
     ]
 
     def __init__(self):
@@ -999,6 +1011,8 @@ class M5Watcher(App):
         }
         self._paused = False
         self._tick   = 0
+        self._graph_data:   dict = {}
+        self._graph_filter: str  = "all"
         # Header rich-info cache
         self._boot_time   = psutil.boot_time()
         self._sess_n      = _claude_session_number()
@@ -1026,6 +1040,10 @@ class M5Watcher(App):
                     f"[italic {DIM}]The autonomic nervous system of the Polpo — Claude, MCP, daemons, watchdogs, alive.[/]",
                     id="tent-header")
                 yield DataTable(id="tent-table", cursor_type="row", zebra_stripes=True)
+            with TabPane("🕸 Graph", id="tab-graph"):
+                yield Static(
+                    f"[{DIM}]🔄 Parsing vault Obsidian…[/]",
+                    id="graph-static")
         with Horizontal(id="top-row"):
             with ScrollableContainer(id="cpu-panel"):
                 yield Static(
@@ -1093,10 +1111,11 @@ class M5Watcher(App):
     async def _refresh_slow(self) -> None:
         if self._paused:
             return
-        self._mem, self._bat, self._proc_counts = await asyncio.gather(
+        self._mem, self._bat, self._proc_counts, self._graph_data = await asyncio.gather(
             asyncio.to_thread(ds.unified_memory),
             asyncio.to_thread(ds.battery),
             asyncio.to_thread(_count_claude_mcp),
+            asyncio.to_thread(vault_parser.vault_graph_data),
         )
         self._mem_history.append(self._mem.get('pct', 0))
 
@@ -1107,6 +1126,9 @@ class M5Watcher(App):
             render_mem(self._mem, self._mem_history, cpu_avg, la1)
         )
         await self._update_processes()
+        self.query_one("#graph-static", Static).update(
+            graph_widget.render_graph(self._graph_data, filter_mode=self._graph_filter)
+        )
 
     async def _update_processes(self) -> None:
         procs = await asyncio.to_thread(ds.top_processes, 16)
@@ -1186,6 +1208,16 @@ class M5Watcher(App):
     def action_show_tab_stats(self) -> None: self.query_one(TabbedContent).active = "tab-stats"
     def action_show_tab_procs(self) -> None: self.query_one(TabbedContent).active = "tab-procs"
     def action_show_tab_tent(self)  -> None: self.query_one(TabbedContent).active = "tab-tent"
+    def action_show_tab_graph(self) -> None: self.query_one(TabbedContent).active = "tab-graph"
+
+    def action_cycle_graph_filter(self) -> None:
+        modes = graph_widget.FILTER_MODES
+        idx = modes.index(self._graph_filter)
+        self._graph_filter = modes[(idx + 1) % len(modes)]
+        self.query_one("#graph-static", Static).update(
+            graph_widget.render_graph(self._graph_data, filter_mode=self._graph_filter)
+        )
+        self.notify(f"Graph filter: {self._graph_filter}", timeout=1.2)
 
 
 if __name__ == "__main__":

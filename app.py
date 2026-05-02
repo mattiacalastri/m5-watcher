@@ -115,6 +115,20 @@ HEAT_MAP = [           # (char, color) by intensity 0-7
 
 TREND_WINDOW = 6
 N_CORES = ds.E_CORES + ds.P_CORES   # 18
+JARVIS_DIR = Path.home() / ".local" / "run" / "jarvis"
+
+_VOICE_NAMES: dict[str, str] = {
+    "andy":     "Andy M – Italian Male Warm",
+    "bill":     "Bill – Wise, Mature, Balanced",
+    "callum":   "Callum – Husky Trickster",
+    "carlotta": "Carlotta – Fairy Princess",
+    "daniela":  "Daniela – Giovane ed elegante",
+    "george":   "George – Warm, Captivating",
+    "laura":    "Laura – Enthusiast, Quirky",
+    "mary":     "Mary – Confident, Roman",
+    "mimmi":    "Mimmi – Playful Cartoonish",
+    "roger":    "Roger – Laid-Back, Resonant",
+}
 
 
 def _c(v: float) -> str:
@@ -419,6 +433,188 @@ def render_analytics(cpu_h: deque[float], mem_h: deque[float],
     return "\n".join(lines)
 
 
+# ── Voice data reader + renderer ─────────────────────────────────────────────
+
+def _jread(name: str, default: str = "") -> str:
+    """Read a jarvis runtime file safely."""
+    try:
+        return (JARVIS_DIR / name).read_text(errors="ignore").strip()
+    except OSError:
+        return default
+
+
+def voice_data() -> dict:
+    """Read live voice state from ~/.local/run/jarvis/ — all file I/O, no subprocess."""
+    import struct as _struct
+
+    state    = _jread("stt_state", "offline")
+    engine   = _jread("stt_engine.txt", "—").upper()
+    voice    = _jread("voice_selected", "—")
+    autosend = _jread("jarvis_autosend_state", "off")
+    loop     = _jread("jarvis_voice_loop_state", "off")
+
+    diag: dict[str, str] = {}
+    for part in _jread("stt_diag.txt").split():
+        if "=" in part:
+            k, v = part.split("=", 1)
+            diag[k] = v
+
+    history: list[dict] = []
+    try:
+        raw = (JARVIS_DIR / "stt_history.jsonl").read_text(errors="ignore")
+        for line in raw.strip().splitlines()[-10:]:
+            try:
+                entry = json.loads(line)
+                if "ts" in entry and "text" in entry:
+                    history.append(entry)
+            except (json.JSONDecodeError, ValueError):
+                pass
+    except OSError:
+        pass
+
+    # Audio levels waveform (float32 LE, last 60 samples)
+    levels: list[float] = []
+    try:
+        raw_bytes = (JARVIS_DIR / "stt_levels.bin").read_bytes()
+        n = len(raw_bytes) // 4
+        if n > 0:
+            levels = list(_struct.unpack(f"{n}f", raw_bytes[:n * 4]))
+    except OSError:
+        pass
+
+    return {
+        "state":     state,
+        "engine":    engine,
+        "voice":     voice,
+        "autosend":  autosend,
+        "loop":      loop,
+        "threshold": diag.get("threshold", "—"),
+        "ambient":   diag.get("cal_mean", "—"),
+        "history":   history,
+        "levels":    levels,
+    }
+
+
+def _level_bar(levels: list[float], w: int = 40) -> str:
+    """Render audio levels as colored sparkline waveform."""
+    if not levels:
+        return f'[{DIM}]{"─" * w}[/]'
+    vals = levels[-w:]
+    mx = max(max(vals), 1e-6)
+    out = []
+    for v in vals:
+        norm = v / mx
+        if norm > 0.75:   color = HOT_PINK
+        elif norm > 0.45: color = ORANGE
+        elif norm > 0.2:  color = TEAL
+        else:             color = DIM
+        ch = SPARK[min(8, int(norm * 8.99))]
+        out.append(f"[{color}]{ch}[/]")
+    pad = w - len(vals)
+    if pad > 0:
+        out = [f'[{DIM}]{" " * pad}[/]'] + out
+    return "".join(out)
+
+
+def render_voice(vd: dict) -> str:
+    """Render voice panel — mirrors Polpo Voice app layout in Textual markup."""
+    state    = vd["state"]
+    voice    = vd["voice"]
+    engine   = vd["engine"]
+    autosend = vd["autosend"]
+    loop_st  = vd["loop"]
+    threshold = vd["threshold"]
+    ambient  = vd["ambient"]
+    history  = vd["history"]
+    levels   = vd["levels"]
+
+    # State → color mapping
+    state_color = {
+        "listening":  LIME,
+        "processing": ELEC_BLUE,
+        "speaking":   HOT_PINK,
+        "idle":       DIM,
+    }.get(state, DIM)
+    state_dot = f"[{state_color}]●[/]"
+
+    # Pill colors
+    out_color  = HOT_PINK if autosend == "on" else DIM
+    out_label  = "Attivo"  if autosend == "on" else "Silente"
+    in_color   = LIME if state == "listening" else DIM
+    in_label   = "Attivo" if state == "listening" else "Spento"
+    loop_color = ELEC_BLUE if loop_st not in ("off", "") else DIM
+    loop_label = loop_st.title() if loop_st not in ("off", "") else "Manual"
+    wave_line  = _level_bar(levels, 40)
+
+    voice_display = _VOICE_NAMES.get(voice.lower(), voice.title())
+    voice_star = f"⭐ [bold {ELEC_BLUE}]{voice_display}[/]"
+
+    # Transcriptions with relative timestamps
+    now = time.time()
+    trans_lines: list[str] = []
+    for entry in reversed(history[-5:]):
+        age = now - entry["ts"]
+        if age < 8:
+            ts_str = f"[{HOT_PINK}]ora[/]"
+            bg = BG_ALT
+        elif age < 60:
+            ts_str = f"[{DIM}]{int(age)}s fa[/]"
+            bg = BG
+        elif age < 3600:
+            ts_str = f"[{DIM}]{int(age/60)}m fa[/]"
+            bg = BG
+        else:
+            ts_str = f"[{DIM}]{int(age/3600)}h fa[/]"
+            bg = BG
+        text = entry["text"]
+        if len(text) > 52:
+            text = text[:50] + "…"
+        trans_lines.append(f"  {ts_str}  [{FG}]{text}[/]")
+
+    n_total = len(history)
+
+    lines = [
+        # ── Header
+        f"  [bold {HOT_PINK}]🐙 Polpo[/] [{DIM}]·[/] [bold {WHITE}]Voice[/]  "
+        f"{state_dot} [{DIM}]{state}[/]",
+        f"  [{DIM}]🎙 Microfono MacBook Pro  ·  🔊 Altoparlanti[/]",
+        "",
+        # ── State pills
+        f"  [{DIM}][[/][bold {out_color}]🔇 OUT[/] [{DIM}]][/] {out_label}"
+        f"   [{DIM}][[/][bold {in_color}]🎤 IN[/] [{DIM}]][/] {in_label}"
+        f"   [{DIM}][[/][bold {loop_color}]🔄 LOOP[/] [{DIM}]][/] {loop_label}"
+        f"   [{DIM}][[/][bold {TEAL}]💬 DIALOG[/] [{DIM}]][/] Solo testo",
+        "",
+        # ── Waveform
+        f"  {wave_line}",
+        "",
+        # ── Voice selection
+        f"  [{DIM}]VOCE DEL POLPO[/]",
+        f"  {voice_star}  [{HOT_PINK}]▶[/]",
+        "",
+        # ── Transcriptions
+        f"  [{DIM}]TRASCRIZIONI RECENTI[/]  [{DIM}]{n_total} totali[/]",
+    ]
+    if trans_lines:
+        lines.extend(trans_lines)
+    else:
+        lines.append(f"  [{DIM}]nessuna trascrizione recente[/]")
+
+    lines += [
+        "",
+        # ── Diagnostics
+        f"  [{DIM}]DIAGNOSTICA STT[/]",
+        f"  [{ELEC_BLUE}]ENGINE[/] [bold {FG}]{engine}[/]   "
+        f"[{DEEP_PURPL}]THRESHOLD[/] [bold {FG}]{threshold}[/]   "
+        f"[{TEAL}]AMBIENT[/] [bold {FG}]{ambient}[/]",
+        "",
+        # ── Footer
+        f"  [{DIM}]dev@digitalastra.it[/]",
+        f"  [bold {HOT_PINK}]🐙[/] [{DIM}]tentacolo vocale[/]",
+    ]
+    return "\n".join(lines)
+
+
 # ── Rainbow title (HSV flow, light pastel + wave luminosity modulation) ───────
 RAINBOW_SAT     = 0.55   # 0=grey, 1=neon. 0.55 = leggero/pastel
 RAINBOW_VAL     = 1.00   # luminosità piena di base
@@ -698,16 +894,54 @@ class M5Watcher(App):
     TabbedContent {{
         background: {BG};
     }}
-    TabbedContent Tabs {{
-        align-horizontal: center;
+    Tabs {{
+        align: center middle;
+        background: {BG};
+        border-bottom: tall {TEAL};
+    }}
+    Tab {{
+        color: {DIM};
+        background: {BG};
+        padding: 0 2;
+    }}
+    Tab:hover {{
+        color: {FG};
+        background: {BG_ALT};
+    }}
+    Tab.-active {{
+        color: {ELEC_BLUE};
+        background: {BG_ALT};
+        text-style: bold;
+    }}
+    Tab.-active:hover {{
+        color: {ELEC_BLUE};
+        background: {BG_ALT};
     }}
     TabPane {{
         background: {BG};
-        padding: 1 1;
+        padding: 0 0;
     }}
-    #heat-static, #analytics-static {{
+    #heat-row {{
+        height: 1fr;
+    }}
+    #heat-static {{
+        width: 53%;
         background: {BG_ALT};
         border: heavy {TEAL};
+        padding: 1 2;
+        height: 1fr;
+    }}
+    #analytics-static {{
+        background: {BG_ALT};
+        border: heavy {TEAL};
+        padding: 1 2;
+        height: 1fr;
+    }}
+    #voice-static {{
+        width: 47%;
+        background: {BG_ALT};
+        border: heavy {HOT_PINK};
+        border-title-color: {HOT_PINK};
         padding: 1 2;
         height: 1fr;
     }}
@@ -763,7 +997,9 @@ class M5Watcher(App):
         yield TitleBar(id="title-bar")
         with TabbedContent(id="tab-area"):
             with TabPane("🌡 Heatmap", id="tab-heat"):
-                yield Static(f"[{DIM}]Accumulating core samples…[/]", id="heat-static")
+                with Horizontal(id="heat-row"):
+                    yield Static(f"[{DIM}]Accumulating core samples…[/]", id="heat-static")
+                    yield Static(render_voice(voice_data()), id="voice-static")
             with TabPane("📈 Analytics", id="tab-stats"):
                 yield Static(f"[{DIM}]Building statistics…[/]", id="analytics-static")
             with TabPane("🔝 Processes", id="tab-procs"):
@@ -839,6 +1075,7 @@ class M5Watcher(App):
             render_analytics(self._cpu_history, self._mem_history,
                              self._core_history, overall, mem_now, la1)
         )
+        self.query_one("#voice-static", Static).update(render_voice(voice_data()))
         self._update_subtitle(overall, la1)
 
     async def _refresh_slow(self) -> None:

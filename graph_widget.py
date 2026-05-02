@@ -180,6 +180,61 @@ def render_graph(
         "",
     ]
 
+    # ── Semantic areas (folder distribution) ─────────────────────────────────
+    _AREA_COLORS: dict[str, str] = {
+        "Sessioni":              ELEC_BLUE,
+        "🧠 Memory":             HOT_PINK,
+        "6 — Knowledge Library": ORANGE,
+        "Seeds":                 LIME,
+        "3.1 — Deep Research":   TEAL,
+        "4 — Operations":        SOFT_GREEN,
+        "🧠 Knowledge":          FG,
+        "🐙 Claude":             DEEP_PURPL,
+        "Clienti":               TEAL,
+        "Cicatrici":             HOT_PINK,
+        "Dream Cycle":           SOFT_GREEN,
+        "5 — Vision":            LIME,
+        "Persone":               FG,
+    }
+    _sem_comm = intel.get("semantic_communities", [])
+    if _sem_comm:
+        _sem_total = sum(c["size"] for c in _sem_comm) or 1
+        _PALETTE = [TEAL, ELEC_BLUE, LIME, HOT_PINK, ORANGE, DEEP_PURPL, SOFT_GREEN, FG]
+        def _sem_row(i: int, c: dict) -> str:
+            color = _PALETTE[i % len(_PALETTE)]
+            label = c["label"][:20]
+            return (
+                f"  [{color}]{label:<20}[/] "
+                f"{_bar(c['size'], _sem_total, 12, color)} "
+                f"[{DIM}]{c['size']:>5}[/]"
+            )
+        area_lines = [
+            f"  [{ELEC_BLUE}]🗂 AREE SEMANTICHE[/]  [{DIM}]· community detection[/]",
+            div,
+            *[_sem_row(i, c) for i, c in enumerate(_sem_comm[:8])],
+            "",
+        ]
+    else:
+        fd       = intel.get("folder_dist", {})
+        fd_total = sum(fd.values()) or 1
+        top_areas = sorted(fd.items(), key=lambda x: x[1], reverse=True)[:8]
+
+        def area_row(folder: str, count: int) -> str:
+            color = _AREA_COLORS.get(folder, DIM)
+            label = folder[:18]
+            return (
+                f"  [{color}]{label:<18}[/] "
+                f"{_bar(count, fd_total, 14, color)} "
+                f"[{DIM}]{count:>5}[/]"
+            )
+
+        area_lines = [
+            f"  [{ELEC_BLUE}]🗂 AREE SEMANTICHE[/]",
+            div,
+            *[area_row(f, c) for f, c in top_areas],
+            "",
+        ]
+
     # ── Recent activity ───────────────────────────────────────────────────────
     recent_today = intel.get("recent_today", [])
     recent_rows  = [
@@ -229,6 +284,7 @@ def render_graph(
         *neural_lines,
         *attractor_lines,
         *status_lines,
+        *area_lines,
         *recent_lines,
         *conn_lines,
         "",

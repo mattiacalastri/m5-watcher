@@ -1,12 +1,15 @@
 """Vault parser — wikilink extractor + NetworkX graph + Neural Density intelligence."""
 from __future__ import annotations
 
+import json
 import re
 import time
 from datetime import datetime
 from pathlib import Path
 
 import networkx as nx
+
+_SEMANTIC_AREAS_PATH = Path(__file__).parent / "semantic_areas.json"
 
 VAULT_PATH = (
     Path.home()
@@ -20,6 +23,18 @@ CACHE_TTL = 60.0   # vault changes slowly; 60s is plenty
 
 _cache:    dict | None = None
 _cache_ts: float       = 0.0
+
+
+def _load_semantic_communities() -> list[dict]:
+    """Load pre-computed semantic communities from semantic_areas.json if present."""
+    try:
+        data = json.loads(_SEMANTIC_AREAS_PATH.read_text())
+        return [
+            {"label": c["label"], "size": c["size"], "top_hubs": c["top_hubs"][:3]}
+            for c in data.get("communities", [])
+        ]
+    except Exception:
+        return []
 
 
 def _classify(G: nx.DiGraph, node: str) -> str:
@@ -59,6 +74,15 @@ def vault_graph_data(vault: Path = VAULT_PATH) -> dict:
             mtime_map[stem] = f.stat().st_mtime
         except OSError:
             mtime_map[stem] = 0.0
+
+    # Folder distribution — semantic areas (first-level dirs relative to vault)
+    folder_dist: dict[str, int] = {}
+    for f in md_files:
+        try:
+            top = f.relative_to(vault).parts[0] if len(f.relative_to(vault).parts) > 1 else "_root"
+        except ValueError:
+            top = "_root"
+        folder_dist[top] = folder_dist.get(top, 0) + 1
 
     # Pass 2 — single read per file: wikilinks + frontmatter status
     status_dist: dict[str, int] = {"seed": 0, "growing": 0, "evergreen": 0, "stub": 0}
@@ -161,6 +185,7 @@ def vault_graph_data(vault: Path = VAULT_PATH) -> dict:
         },
         "intel": {
             "status_dist":   status_dist,
+            "folder_dist":   folder_dist,
             "recent_today":  recent_today[:8],
             "recent_7d":     recent_7d,
             "top_indegree":  top_indegree_data,   # (name, in, out, type, betweenness)
@@ -171,6 +196,7 @@ def vault_graph_data(vault: Path = VAULT_PATH) -> dict:
             "avg_degree":    avg_degree,
             "clustering":    clustering,
             "top_bridges":   top_bridges,
+            "semantic_communities": _load_semantic_communities(),
         },
     }
     _cache_ts = now

@@ -528,20 +528,20 @@ def render_voice(vd: dict) -> str:
     history  = vd["history"]
     levels   = vd["levels"]
 
-    # State → color mapping
+    # State → color mapping (stt_state values: transcribing/idle/speaking/offline)
     state_color = {
-        "listening":  LIME,
-        "processing": ELEC_BLUE,
-        "speaking":   HOT_PINK,
-        "idle":       DIM,
+        "transcribing": LIME,
+        "idle":         TEAL,
+        "speaking":     HOT_PINK,
+        "offline":      DIM,
     }.get(state, DIM)
     state_dot = f"[{state_color}]●[/]"
 
     # Pill colors
     out_color  = HOT_PINK if autosend == "on" else DIM
     out_label  = "Attivo"  if autosend == "on" else "Silente"
-    in_color   = LIME if state == "listening" else DIM
-    in_label   = "Attivo" if state == "listening" else "Spento"
+    in_color   = LIME if state == "transcribing" else (TEAL if state == "idle" else DIM)
+    in_label   = "Attivo" if state == "transcribing" else ("In ascolto" if state == "idle" else "Spento")
     loop_color = ELEC_BLUE if loop_st not in ("off", "") else DIM
     loop_label = loop_st.title() if loop_st not in ("off", "") else "Manual"
     wave_line  = _level_bar(levels, 40)

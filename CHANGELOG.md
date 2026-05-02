@@ -5,6 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 
 ---
 
+## [2.3.0] — 2026-05-03 · Process Triage Advisor (sess.1376)
+
+**Released sess.1376** — process knowledge base with 40+ Polpo-aware patterns.
+Press `c` to open TriageScreen modal with KILL_SAFE / CAUTIOUS / KEEP labels.
+
+### Added
+- **`triage_processes()` in data_sources.py** — KB 40+ patterns for MCP servers,
+  LaunchAgents, Claude sessions, daemons, watchdogs. Edge case: MCP with
+  `parent=launchd` → CAUTIOUS (not spawned by a live Claude = orphan risk)
+- **`TriageScreen` ModalScreen in app.py** — overlay with KILL_SAFE (green) /
+  CAUTIOUS (yellow) / KEEP (teal) color-coded process list. Keybinding `c`
+- **Knowledge base** — recognizes: claude code sessions, MCP server processes,
+  Jarvis STT/TTS daemons, LaunchAgents (btc, bridge, watcher), polpo daemons
+
+---
+
 ## [2.2.1] — 2026-05-03 · Graph Full-Screen Mode
 
 **Released sess.1376** — full-screen Graph tab: top-row hides automatically

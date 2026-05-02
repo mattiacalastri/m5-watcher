@@ -33,3 +33,6 @@ secrets.json
 
 # Python version managers
 .python-version
+
+# Generated vault data — user-specific, regenerate with vault_parser.py
+semantic_areas.json

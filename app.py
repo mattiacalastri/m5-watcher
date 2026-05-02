@@ -748,8 +748,6 @@ def _claude_session_number() -> str:
         # session_current.md probable paths in ordine di freshness atteso
         home / "projects/claude-memory/session_current.md",
         home / "graphify-polpo-core/session_current.md",
-        home / ".claude/projects/-Users-mattiacalastri-Library-Mobile-Documents-com-apple-CloudDocs/sessions/session_current.md",
-        home / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Astra Digital Marketing/Sessioni/session_current.md",
     ]
 
     for path in candidates:

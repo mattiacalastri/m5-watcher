@@ -61,6 +61,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
 from textual.reactive import reactive
+from textual import events
 from textual.widgets import DataTable, Footer, Static, TabbedContent, TabPane
 
 import data_sources as ds
@@ -361,7 +362,8 @@ def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str
 
 def render_analytics(cpu_h: deque[float], mem_h: deque[float],
                      core_h: dict[int, deque[float]],
-                     cpu_now: float, mem_now: float, load: float) -> str:
+                     cpu_now: float, mem_now: float, load: float,
+                     spark_w: int = 56) -> str:
 
     def stat_row(emoji: str, label: str, data: deque[float], unit: str = '%') -> str:
         vals = list(data)
@@ -430,8 +432,8 @@ def render_analytics(cpu_h: deque[float], mem_h: deque[float],
         f"   {ratio_txt}",
         "",
         f"  [{ORANGE}]━━ 2-MIN TIMELINE[/]",
-        f"  [{_c(cpu_now)}]{sparkline(cpu_h, 56)}[/]  ⚡ [{DIM}]cpu[/]",
-        f"  [{_c(mem_now)}]{sparkline(mem_h, 56)}[/]  🧠 [{DIM}]ram[/]",
+        f"  [{_c(cpu_now)}]{sparkline(cpu_h, spark_w)}[/]  ⚡ [{DIM}]cpu[/]",
+        f"  [{_c(mem_now)}]{sparkline(mem_h, spark_w)}[/]  🧠 [{DIM}]ram[/]",
     ]
     return "\n".join(lines)
 
@@ -531,7 +533,7 @@ def _level_bar(levels: list[float], w: int = 40) -> str:
     return "".join(out)
 
 
-def render_voice(vd: dict) -> str:
+def render_voice(vd: dict, level_w: int = 40) -> str:
     """Render voice panel — mirrors Polpo Voice app layout in Textual markup."""
     state    = vd["state"]
     voice    = vd["voice"]
@@ -559,7 +561,7 @@ def render_voice(vd: dict) -> str:
     in_label   = "Attivo" if state == "transcribing" else ("In ascolto" if state == "idle" else "Spento")
     loop_color = ELEC_BLUE if loop_st not in ("off", "") else DIM
     loop_label = loop_st.title() if loop_st not in ("off", "") else "Manual"
-    wave_line  = _level_bar(levels, 40)
+    wave_line  = _level_bar(levels, level_w)
 
     voice_display = vd.get("voice_full") or _VOICE_NAMES.get(voice.lower(), voice.title())
     voice_star = f"⭐ [bold {ELEC_BLUE}]{voice_display}[/]"
@@ -853,14 +855,28 @@ class TitleBar(Static):
         claude_n = info.get('claude_count', 0)
         mcp_n = info.get('mcp_count', 0)
         time_str = info.get('time', time.strftime("%H:%M:%S"))
+        cols = info.get('cols', 120)
         sep = f"  [{DIM}]┃[/]  "
-        line3 = (
-            f"🎯 [{DIM}]sess[/] [bold {WHITE}]{sess}[/]"
-            f"{sep}⏱ [{DIM}]up[/] [bold {ELEC_BLUE}]{uptime}[/]"
-            f"{sep}🐙 [bold {HOT_PINK}]×{claude_n}[/]"
-            f"{sep}🔌 [bold {SOFT_GREEN}]×{mcp_n}[/]"
-            f"{sep}🕐 [bold {TEAL}]{time_str}[/]"
-        )
+        if cols >= 100:
+            line3 = (
+                f"🎯 [{DIM}]sess[/] [bold {WHITE}]{sess}[/]"
+                f"{sep}⏱ [{DIM}]up[/] [bold {ELEC_BLUE}]{uptime}[/]"
+                f"{sep}🐙 [bold {HOT_PINK}]×{claude_n}[/]"
+                f"{sep}🔌 [bold {SOFT_GREEN}]×{mcp_n}[/]"
+                f"{sep}🕐 [bold {TEAL}]{time_str}[/]"
+            )
+        elif cols >= 80:
+            line3 = (
+                f"[{DIM}]sess[/] [bold {WHITE}]{sess}[/]  "
+                f"🐙[bold {HOT_PINK}]×{claude_n}[/] 🔌[bold {SOFT_GREEN}]×{mcp_n}[/]  "
+                f"[bold {TEAL}]{time_str}[/]"
+            )
+        else:
+            line3 = (
+                f"[bold {WHITE}]{sess}[/]  "
+                f"[bold {HOT_PINK}]×{claude_n}[/]  "
+                f"[{TEAL}]{time_str}[/]"
+            )
 
         line4 = self.status if self.status else f"[{DIM}]🔄 Probing system…[/]"
         self.update(f"{line1}\n{line2}\n{line3}\n{line4}")
@@ -892,7 +908,7 @@ class M5Watcher(App):
     }}
     #top-row {{
         height: auto;
-        min-height: 26;
+        min-height: 22;
         max-height: 34;
     }}
     #cpu-panel, #mem-panel {{
@@ -917,28 +933,32 @@ class M5Watcher(App):
     TabbedContent {{
         background: {BG};
     }}
+    ContentSwitcher {{
+        border-top: tall {TEAL};
+    }}
     Tabs {{
-        align: center middle;
         background: {BG};
-        border-bottom: tall {TEAL};
+        height: 3;
+        width: auto;
     }}
     Tab {{
         color: {DIM};
         background: {BG};
-        padding: 0 2;
+        padding: 0 3;
+        height: 1fr;
     }}
     Tab:hover {{
         color: {FG};
         background: {BG_ALT};
     }}
     Tab.-active {{
-        color: {ELEC_BLUE};
-        background: {BG_ALT};
+        color: {TEAL};
+        background: #0a2a1e;
         text-style: bold;
     }}
     Tab.-active:hover {{
-        color: {ELEC_BLUE};
-        background: {BG_ALT};
+        color: {TEAL};
+        background: #0d3325;
     }}
     TabPane {{
         background: {BG};
@@ -1018,6 +1038,9 @@ class M5Watcher(App):
         self._boot_time   = psutil.boot_time()
         self._sess_n      = _claude_session_number()
         self._proc_counts = {'claude': 0, 'mcp': 0}
+        # Responsive layout — updated on terminal resize
+        self._cols: int = 120
+        self._rows: int = 40
 
     # ── Layout ────────────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -1060,8 +1083,52 @@ class M5Watcher(App):
                     id="mem-content")
         yield Footer()
 
+    # ── Responsive helpers ────────────────────────────────────────────────────
+    def _heatmap_cols(self) -> int:
+        """Heatmap column count — scales with terminal width (53% panel, prefix ~12)."""
+        return max(20, int(self._cols * 0.51) - 12)
+
+    def _spark_width(self) -> int:
+        """Sparkline width for analytics tab — full-width panel minus labels."""
+        return max(20, self._cols - 22)
+
+    def _voice_width(self) -> int:
+        """Level bar width for voice panel — 47% panel minus padding/prefix."""
+        return max(20, int(self._cols * 0.45) - 10)
+
+    def _center_tabs(self) -> None:
+        """Center the Tabs bar horizontally by setting margin_left dynamically.
+
+        Textual 8.x Tabs (width:auto) places its first Tab at col 3 naturally;
+        the 5-tab block spans ~83 chars (centre at col 44).  We shift by
+        max(0, cols//2 - 45) so the block centres at cols/2.
+        """
+        try:
+            margin = max(0, self._cols // 2 - 45)
+            self.query_one("Tabs").styles.margin = (0, 0, 0, margin)
+        except Exception:
+            pass
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Capture terminal size and adapt layout + panels immediately."""
+        self._cols = event.size.width
+        self._rows = event.size.height
+        # Shrink top-row on small terminals so tab area keeps breathing room
+        new_min = max(20, min(26, self._rows * 55 // 100))
+        top_row = self.query_one("#top-row")
+        top_row.styles.min_height = new_min
+        top_row.styles.max_height = max(new_min + 6, 34)
+        # Compact TitleBar on very small terminals
+        self.query_one("#title-bar").styles.height = 6 if self._rows < 35 else 8
+        # Immediately re-render width-sensitive panels
+        self.query_one("#heat-static", Static).update(
+            render_heatmap(self._core_history, cols=self._heatmap_cols())
+        )
+        self._center_tabs()
+
     async def on_mount(self) -> None:
         self._init_tables()
+        self._center_tabs()
         await asyncio.to_thread(psutil.cpu_percent, percpu=True, interval=None)
         # Seed disk/net deltas
         await asyncio.to_thread(ds.disk_io_rate)
@@ -1100,13 +1167,16 @@ class M5Watcher(App):
             render_cpu(self._cpu_percents, self._cpu_history, self._disk, self._net)
         )
         self.query_one("#heat-static",   Static).update(
-            render_heatmap(self._core_history)
+            render_heatmap(self._core_history, cols=self._heatmap_cols())
         )
         self.query_one("#analytics-static", Static).update(
             render_analytics(self._cpu_history, self._mem_history,
-                             self._core_history, overall, mem_now, la1)
+                             self._core_history, overall, mem_now, la1,
+                             spark_w=self._spark_width())
         )
-        self.query_one("#voice-static", Static).update(render_voice(voice_data()))
+        self.query_one("#voice-static", Static).update(
+            render_voice(voice_data(), level_w=self._voice_width())
+        )
         self._update_subtitle(overall, la1)
 
     async def _refresh_slow(self) -> None:
@@ -1165,18 +1235,30 @@ class M5Watcher(App):
         swap_color = HOT_PINK if swap_gb > 0.5 else (ORANGE if swap_gb > 0 else DIM)
 
         sep = f"  [{DIM}]┃[/]  "
-        status = (
-            f"{live}"
-            f"{sep}{bat_emoji} [bold {LIME}]{pct}%[/]"
-            f"{sep}⚡ [bold {_c(cpu)}]{cpu:4.0f}%[/]"
-            f"{sep}⚖ [bold {_c(load / N_CORES * 100)}]{load:4.1f}[/]"
-            f"{sep}{prs_emoji} [bold {pc}]{prs[0]}[/] "
-            f"[{LIME}]{free_gb:.1f}G[/][{DIM}]free[/] "
-            f"[{ORANGE}]{comp_gb:.1f}G[/][{DIM}]z[/] "
-            f"[{swap_color}]{swap_gb:.1f}G[/][{DIM}]swp[/]"
-            f"{sep}💾 [{CYAN}]↓{d.get('read', 0):4.1f}[/] [{HOT_PINK}]↑{d.get('write', 0):4.1f}[/]"
-            f"{sep}🌐 [{CYAN}]↓{n.get('recv', 0):4.2f}[/] [{HOT_PINK}]↑{n.get('sent', 0):4.2f}[/]"
-        )
+        # Core metrics — always visible
+        status_parts = [
+            live,
+            f"{bat_emoji} [bold {LIME}]{pct}%[/]",
+            f"⚡ [bold {_c(cpu)}]{cpu:4.0f}%[/]",
+            f"⚖ [bold {_c(load / N_CORES * 100)}]{load:4.1f}[/]",
+        ]
+        # Add memory pressure section at >= 90 cols
+        if self._cols >= 90:
+            status_parts.append(
+                f"{prs_emoji} [bold {pc}]{prs[0]}[/] "
+                f"[{LIME}]{free_gb:.1f}G[/][{DIM}]free[/] "
+                f"[{ORANGE}]{comp_gb:.1f}G[/][{DIM}]z[/] "
+                f"[{swap_color}]{swap_gb:.1f}G[/][{DIM}]swp[/]"
+            )
+        # Add disk + net I/O at >= 130 cols
+        if self._cols >= 130:
+            status_parts.append(
+                f"💾 [{CYAN}]↓{d.get('read', 0):4.1f}[/] [{HOT_PINK}]↑{d.get('write', 0):4.1f}[/]"
+            )
+            status_parts.append(
+                f"🌐 [{CYAN}]↓{n.get('recv', 0):4.2f}[/] [{HOT_PINK}]↑{n.get('sent', 0):4.2f}[/]"
+            )
+        status = sep.join(status_parts)
 
         # Rich-info header (refresh ogni tick fast)
         uptime_s = int(time.time() - self._boot_time)
@@ -1186,6 +1268,7 @@ class M5Watcher(App):
             'claude_count': self._proc_counts.get('claude', 0),
             'mcp_count':    self._proc_counts.get('mcp', 0),
             'time':         time.strftime("%H:%M:%S"),
+            'cols':         self._cols,
         }
 
         title_bar = self.query_one("#title-bar", TitleBar)
@@ -1193,23 +1276,68 @@ class M5Watcher(App):
         title_bar.rich_info = rich
 
     # ── Actions ───────────────────────────────────────────────────────────────
+    def _cpu_avg(self) -> float:
+        return mean(self._cpu_percents) if self._cpu_percents else 0.0
+
     async def action_force_refresh(self) -> None:
         await self._refresh_fast()
         await self._refresh_slow()
-        self.notify("Refreshed", severity="information", timeout=1)
+        cpu  = self._cpu_avg()
+        free = self._mem.get('free', 0) / 1024 ** 3
+        bat  = self._bat.get('pct', 100)
+        n_cl = self._proc_counts.get('claude', 0)
+        n_mc = self._proc_counts.get('mcp', 0)
+        self.notify(
+            f"⟳  ⚡ {cpu:.0f}%  ·  🧠 {free:.1f}G free"
+            f"  ·  🔋 {bat}%  ·  🐙 ×{n_cl}  🔌 ×{n_mc}",
+            severity="information",
+            timeout=2.5,
+        )
 
     def action_toggle_pause(self) -> None:
         self._paused = not self._paused
+        if self._paused:
+            self.notify(
+                f"⏸  Paused at {time.strftime('%H:%M:%S')}  ·  tick #{self._tick}",
+                severity="warning",
+                timeout=2.0,
+            )
+        else:
+            self.notify(
+                f"▶  Live  ·  ⚡ {self._cpu_avg():.0f}%  ·  tick #{self._tick}",
+                severity="information",
+                timeout=1.5,
+            )
+
+    def action_show_tab_heat(self) -> None:
+        self.query_one(TabbedContent).active = "tab-heat"
+        window_s = 60 * 2
+        self.notify(f"🌡  Heatmap  ·  {window_s}s window  ·  {N_CORES} cores", timeout=1.5)
+
+    def action_show_tab_stats(self) -> None:
+        self.query_one(TabbedContent).active = "tab-stats"
+        mem_pct = self._mem.get('pct', 0)
         self.notify(
-            f"[{YELLOW}]PAUSED[/]" if self._paused else f"[{GREEN}]LIVE[/]",
-            timeout=1.5
+            f"📈  Analytics  ·  CPU avg {self._cpu_avg():.0f}%  ·  RAM {mem_pct:.0f}%",
+            timeout=1.5,
         )
 
-    def action_show_tab_heat(self)  -> None: self.query_one(TabbedContent).active = "tab-heat"
-    def action_show_tab_stats(self) -> None: self.query_one(TabbedContent).active = "tab-stats"
-    def action_show_tab_procs(self) -> None: self.query_one(TabbedContent).active = "tab-procs"
-    def action_show_tab_tent(self)  -> None: self.query_one(TabbedContent).active = "tab-tent"
-    def action_show_tab_graph(self) -> None: self.query_one(TabbedContent).active = "tab-graph"
+    def action_show_tab_procs(self) -> None:
+        self.query_one(TabbedContent).active = "tab-procs"
+        self.notify("🔝  Processes  ·  top 16 ranked by CPU + RAM", timeout=1.5)
+
+    def action_show_tab_tent(self) -> None:
+        self.query_one(TabbedContent).active = "tab-tent"
+        n_cl = self._proc_counts.get('claude', 0)
+        n_mc = self._proc_counts.get('mcp', 0)
+        self.notify(
+            f"🐙  Tentacoli  ·  {n_cl} Claude  ·  {n_mc} MCP  ·  background workers",
+            timeout=1.5,
+        )
+
+    def action_show_tab_graph(self) -> None:
+        self.query_one(TabbedContent).active = "tab-graph"
+        self.notify(f"🕸  Graph  ·  filter: {self._graph_filter}", timeout=1.5)
 
     def action_cycle_graph_filter(self) -> None:
         modes = graph_widget.FILTER_MODES
@@ -1218,7 +1346,7 @@ class M5Watcher(App):
         self.query_one("#graph-static", Static).update(
             graph_widget.render_graph(self._graph_data, filter_mode=self._graph_filter)
         )
-        self.notify(f"Graph filter: {self._graph_filter}", timeout=1.2)
+        self.notify(f"🕸  Filter → [{self._graph_filter}]", severity="information", timeout=1.5)
 
 
 if __name__ == "__main__":

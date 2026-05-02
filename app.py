@@ -1,19 +1,67 @@
-"""🐙 M5 MAX WATCHER — Apple M5 Max · Visual Analytics TUI (Textual · Polpo DS)"""
+"""🐙 M5 MAX WATCHER — Visual Analytics TUI for Apple M5 Max
+================================================================================
+
+A real-time Terminal UI cockpit for Apple Silicon M5 Max systems built with
+Textual. Streams CPU per-core (6 efficiency + 12 performance), unified memory
+breakdown (wired/active/inactive/compressed/free), thermal/battery, disk &
+network I/O, plus Polpo "tentacoli" — the live cross-pillar process map of
+Astra Digital Marketing background agents (Claude sessions, MCP servers, Jarvis
+voice daemon, watchdogs, dashboards).
+
+Design philosophy:
+- Data viz first: every glyph, color and emoji is a semantic ancor
+- Polpo Design System: pastel rainbow ad onda title, energy palette
+  (LIME · ELEC_BLUE · DEEP_PURPL · HOT_PINK · ORANGE · SOFT_GREEN · WHITE)
+- Hierarchy explicit: H1 rainbow > H2 colored emoji > H3 cluster > critical
+  values WHITE bold > body semantic-colored > chrome DIM
+- Zero-architecture-change polish: stable layout, refresh logic, bindings
+
+Tabs:
+  🌡 Heatmap     — temporal core heatmap (88s window, Δt=2s)
+  📈 Analytics   — min/avg/p95/max + P/S efficiency ratio + 2-min sparkline
+  🔝 Processes   — top 16 by CPU+RAM
+  🐙 Tentacoli   — Polpo background processes (Claude/MCP/daemons)
+
+Keybindings: q quit · r refresh · p pause · 1-4 tab switch
+Zoom: bottom-right + / − buttons (delegate Cmd+/− to Ghostty)
+
+================================================================================
+"""
 from __future__ import annotations
+
+# ── Metadata ──────────────────────────────────────────────────────────────────
+__title__        = "M5 Max Watcher"
+__version__      = "2.0.0"
+__release_date__ = "2026-05-02"
+__codename__     = "Polpo Data Viz Edition"
+__author__       = "Mattia Calastri"
+__email__        = "mattia@digitalastra.it"
+__company__      = "Astra Digital Marketing"
+__website__      = "https://digitalastra.it"
+__license__      = "Proprietary © 2026 Astra Digital Marketing — All Rights Reserved"
+__copyright__    = "© 2026 Mattia Calastri · Astra Digital Marketing"
+__status__       = "Production"
+__pillar__       = "Astra OS · Polpo Cockpit Suite"
+__forged_in__    = "sess.1238"   # session of consolidation v2.0
+__credits__      = ("Polpo Design System", "Textual", "psutil", "Apple Silicon M5 Max")
 
 import asyncio
 import json
+import math
+import os
+import subprocess
+import time
 from collections import deque
 from colorsys import hsv_to_rgb
 from pathlib import Path
-from statistics import mean, median
+from statistics import mean
 
 import psutil
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.reactive import reactive
-from textual.widgets import DataTable, Footer, Static, TabbedContent, TabPane
+from textual.widgets import Button, DataTable, Footer, Static, TabbedContent, TabPane
 
 import data_sources as ds
 
@@ -24,6 +72,36 @@ BG, BG_ALT           = P["polpo_bg"], P["polpo_bg_alt"]
 TEAL, DIM            = P["polpo_teal"], P["polpo_dim"]
 GREEN, YELLOW, RED   = P["polpo_green"], P["polpo_yellow"], P["polpo_red"]
 FG, MAG, CYAN, SCAR  = P["polpo_fg"], P["polpo_magenta"], P["polpo_cyan"], P["polpo_scar"]
+
+# ── Energy boost palette (data viz hierarchy) ─────────────────────────────────
+WHITE      = "#ffffff"   # critical headlines / super-bright peak
+LIME       = "#a8ff60"   # alive/healthy/energy positive
+ELEC_BLUE  = "#00e5ff"   # electric accent / live data flow
+HOT_PINK   = "#ff2d92"   # attention magenta / spike alert
+ORANGE     = "#ff8a3d"   # warm warning / heat
+DEEP_PURPL = "#9d4dff"   # P-cluster signature (performance)
+SOFT_GREEN = "#5dffaa"   # S-cluster signature (efficiency)
+
+
+def health_emoji(s: int) -> str:
+    """Emoji semantica per health score: visuale immediata < 1ms cognitive load."""
+    if s >= 80: return "💚"
+    if s >= 60: return "💛"
+    if s >= 40: return "🟧"
+    return "❤️"
+
+
+def trend_emoji(data: deque[float]) -> str:
+    """Trend arrow as emoji-glyph for higher visibility."""
+    vals = list(data)[-TREND_WINDOW:]
+    if len(vals) < 3:
+        return f'[{DIM}]─[/]'
+    slope = (vals[-1] - vals[0]) / len(vals)
+    if slope > 4:    return f'[{HOT_PINK}]▲▲[/]'
+    if slope > 1.5:  return f'[{ORANGE}]▲[/]'
+    if slope < -4:   return f'[{LIME}]▼▼[/]'
+    if slope < -1.5: return f'[{SOFT_GREEN}]▼[/]'
+    return f'[{DIM}]●[/]'
 
 # ── Visual primitives ──────────────────────────────────────────────────────────
 BAR8  = ' ▏▎▍▌▋▊▉█'   # 9-step smooth fill
@@ -117,7 +195,7 @@ def health_score(cpu: float, ram: float, load: float) -> tuple[int, str]:
 def render_cpu(percents: list[float], history: deque[float],
                disk: dict, net: dict) -> str:
     if not percents:
-        return f"[{DIM}]Probing 18 cores…[/]"
+        return f"[{DIM}]🔄 Probing 18 cores…[/]"
 
     e_vals = percents[:ds.E_CORES]
     p_vals = percents[ds.E_CORES: ds.E_CORES + ds.P_CORES]
@@ -126,77 +204,85 @@ def render_cpu(percents: list[float], history: deque[float],
     la1, la5, la15 = ds.load_avg()
     overall = mean(percents)
     hs, hc  = health_score(overall, 0, la1)   # mem not available here, pass 0
+    h_emoji = health_emoji(hs)
 
     lines = [
         # ── Health badge + overall bar
-        f"  [{hc}]● HEALTH {hs:3d}/100[/]   [{DIM}]Load[/] [{TEAL}]{la1:.2f}[/] [{DIM}]{la5:.2f}  {la15:.2f}[/]",
-        f"  [{_c(overall)}]{bar(overall, 24)}[/]  [{_c(overall)}]{overall:4.1f}%[/] {trend_arrow(history)}",
+        f"  {h_emoji} [{hc}]HEALTH[/] [bold {WHITE}]{hs:3d}[/][{DIM}]/100[/]   "
+        f"[{DIM}]⚖ load[/] [bold {TEAL}]{la1:.2f}[/] [{DIM}]{la5:.2f}  {la15:.2f}[/]",
+        f"  [{_c(overall)}]{bar(overall, 24)}[/]  [bold {_c(overall)}]{overall:4.1f}%[/] {trend_emoji(history)}",
         "",
-        f"  [{DIM}]━━ S-CORES  avg[/{DIM}] [{_c(e_avg)}]{e_avg:4.1f}%[/]  [{DIM}](6 efficiency)[/]",
+        f"  [{SOFT_GREEN}]🍃 S-CORES[/]  [{DIM}]avg[/] [bold {_c(e_avg)}]{e_avg:4.1f}%[/]  [{DIM}]· 6 efficiency[/]",
     ]
     for i, v in enumerate(e_vals):
-        lines.append(f"   [{DIM}]S{i}[/] [{_c(v)}]{bar(v, 14)}[/] {v:3.0f}%")
+        lines.append(f"   [{SOFT_GREEN}]S{i}[/] [{_c(v)}]{bar(v, 14)}[/] [{_c(v)}]{v:3.0f}%[/]")
 
     lines += [
         "",
-        f"  [{DIM}]━━ P-CORES  avg[/{DIM}] [{_c(p_avg)}]{p_avg:4.1f}%[/]  [{DIM}](12 performance)[/]",
+        f"  [{DEEP_PURPL}]🚀 P-CORES[/]  [{DIM}]avg[/] [bold {_c(p_avg)}]{p_avg:4.1f}%[/]  [{DIM}]· 12 performance[/]",
     ]
     for i, v in enumerate(p_vals):
-        lines.append(f"   [{DIM}]P{i:02d}[/] [{_c(v)}]{bar(v, 14)}[/] {v:3.0f}%")
+        lines.append(f"   [{DEEP_PURPL}]P{i:02d}[/] [{_c(v)}]{bar(v, 14)}[/] [{_c(v)}]{v:3.0f}%[/]")
 
     # ── I/O footer
     lines += [
         "",
-        f"  [{DIM}]disk[/] [{CYAN}]↓{disk.get('read', 0):5.1f}[/][{DIM}] ↑[/][{MAG}]{disk.get('write', 0):5.1f} MB/s[/]   "
-        f"[{DIM}]net[/] [{CYAN}]↓{net.get('recv', 0):5.2f}[/][{DIM}] ↑[/][{MAG}]{net.get('sent', 0):5.2f} MB/s[/]",
+        f"  [{ELEC_BLUE}]💾 disk[/] [{CYAN}]↓{disk.get('read', 0):5.1f}[/] [{HOT_PINK}]↑{disk.get('write', 0):5.1f}[/] [{DIM}]MB/s[/]   "
+        f"[{ELEC_BLUE}]🌐 net[/] [{CYAN}]↓{net.get('recv', 0):5.2f}[/] [{HOT_PINK}]↑{net.get('sent', 0):5.2f}[/] [{DIM}]MB/s[/]",
     ]
     return "\n".join(lines)
 
 
 def render_mem(m: dict, history: deque[float], cpu_avg: float, load: float) -> str:
     if not m:
-        return f"[{DIM}]Reading unified memory…[/]"
+        return f"[{DIM}]🔄 Reading unified memory…[/]"
 
     total = m['total']
     prs_label, prs_key = m['pressure']
-    prs_color = {'ok': GREEN, 'info': TEAL, 'warning': YELLOW, 'error': RED}[prs_key]
+    prs_color = {'ok': LIME, 'info': ELEC_BLUE, 'warning': ORANGE, 'error': HOT_PINK}[prs_key]
+    prs_emoji = {'ok': '🟢', 'info': '🔵', 'warning': '🟡', 'error': '🔴'}[prs_key]
+    swap_color = HOT_PINK if m['swap'] > 0.5e9 else (ORANGE if m['swap'] > 0 else DIM)
+    swap_emoji = '🔴' if m['swap'] > 0.5e9 else ('🟡' if m['swap'] > 0 else '⚫')
     hs, hc = health_score(cpu_avg, m['pct'], load)
+    h_emoji = health_emoji(hs)
 
     # Stacked proportional bar
     seg_bar = stacked_bar([
-        (m['wired'],      MAG),
+        (m['wired'],      HOT_PINK),
         (m['active'],     _c(m['active'] / total * 100)),
         (m['inactive'],   DIM),
-        (m['compressed'], YELLOW),
-        (m['free'],       GREEN),
+        (m['compressed'], ORANGE),
+        (m['free'],       LIME),
     ], total, w=38)
 
     seg_labels = (
-        f"[{MAG}]W[/][{DIM}]{gb(m['wired'])}[/] "
+        f"[{HOT_PINK}]W[/][{DIM}]{gb(m['wired'])}[/] "
         f"[{TEAL}]A[/][{DIM}]{gb(m['active'])}[/] "
-        f"[{DIM}]I[/][{DIM}]{gb(m['inactive'])}[/] "
-        f"[{YELLOW}]Z[/][{DIM}]{gb(m['compressed'])}[/] "
-        f"[{GREEN}]F[/][{DIM}]{gb(m['free'])}[/]"
+        f"[{DIM}]I {gb(m['inactive'])}[/] "
+        f"[{ORANGE}]Z[/][{DIM}]{gb(m['compressed'])}[/] "
+        f"[{LIME}]F[/][{DIM}]{gb(m['free'])}[/]"
     )
 
-    def seg(label: str, val: int, color: str) -> str:
+    def seg(emoji: str, label: str, val: int, color: str) -> str:
         b = bar(val / total * 100, 14)
-        return f"   [{DIM}]{label:<11}[/] [{color}]{b}[/] [{DIM}]{gb(val):>7}[/]"
+        return f"   {emoji} [{DIM}]{label:<10}[/] [{color}]{b}[/] [bold {color}]{gb(val):>7}[/]"
 
     return "\n".join([
-        f"  [{hc}]● HEALTH {hs:3d}/100[/]   [{DIM}]Pressure[/] [{prs_color}]{prs_label}[/]  [{DIM}]Swap[/] [{CYAN}]{gb(m['swap'])}[/]",
+        f"  {h_emoji} [{hc}]HEALTH[/] [bold {WHITE}]{hs:3d}[/][{DIM}]/100[/]   "
+        f"{prs_emoji} [{DIM}]pressure[/] [bold {prs_color}]{prs_label}[/]  "
+        f"{swap_emoji} [{DIM}]swap[/] [bold {swap_color}]{gb(m['swap'])}[/]",
         "",
         # Stacked bar — the crown jewel
-        f"  {seg_bar}  [{_c(m['pct'])}]{m['pct']:4.1f}%[/] {trend_arrow(history)}",
-        f"  [{DIM}]W=wired  A=active  I=inactive  Z=compressed  F=free[/]",
+        f"  {seg_bar}  [bold {_c(m['pct'])}]{m['pct']:4.1f}%[/] {trend_emoji(history)}",
+        f"  [{DIM}]W=wired · A=active · I=inactive · Z=compressed · F=free[/]",
         f"  {seg_labels}",
         "",
-        f"  [{DIM}]━━ BREAKDOWN[/]  [{DIM}]Total[/] [{TEAL}]{gb(total)}[/]",
-        seg("Wired",      m['wired'],      MAG),
-        seg("Active",     m['active'],     _c(m['active'] / total * 100)),
-        seg("Inactive",   m['inactive'],   DIM),
-        seg("Compressed", m['compressed'], YELLOW),
-        seg("Free",       m['free'],       GREEN),
+        f"  [{ELEC_BLUE}]🧠 BREAKDOWN[/]  [{DIM}]total[/] [bold {TEAL}]{gb(total)}[/]",
+        seg("🩷", "Wired",      m['wired'],      HOT_PINK),
+        seg("🔷", "Active",     m['active'],     _c(m['active'] / total * 100)),
+        seg("⚫", "Inactive",   m['inactive'],   DIM),
+        seg("🟧", "Compressed", m['compressed'], ORANGE),
+        seg("🟢", "Free",       m['free'],       LIME),
     ])
 
 
@@ -227,10 +313,10 @@ def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str
     axis_str = ''.join(axis_chars)
 
     lines = [
-        f"[bold {TEAL}]CPU HEATMAP[/]  [{DIM}]Δt=2s  window={total_secs}s[/]  "
-        f"[{DIM}]░[/]<25  [{CYAN}]▒[/]25-50  [{YELLOW}]▓[/]50-75  [{RED}]█[/]>75",
+        f"[bold {ORANGE}]🔥 CPU HEATMAP[/]  [{DIM}]Δt=2s · window={total_secs}s[/]  "
+        f"[{DIM}]░[/]<25  [{CYAN}]▒[/]25-50  [{YELLOW}]▓[/]50-75  [{HOT_PINK}]█[/]>75",
         f"[{DIM}]{axis_str}[/]  [{DIM}]avg[/]",
-        f"  [{DIM}]S-CORES (efficiency)[/]",
+        f"  [{SOFT_GREEN}]🍃 S-CORES[/] [{DIM}](efficiency)[/]",
     ]
 
     for i in range(ds.E_CORES):
@@ -240,9 +326,9 @@ def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str
         pad = cols - len(vals)
         pad_str = f'[{DIM}]{" " * pad}[/]' if pad > 0 else ''
         avg = mean(vals) if vals else 0
-        lines.append(f"  [{DIM}]S{i}[/] {pad_str}{cells}  [{_c(avg)}]{avg:3.0f}%[/]")
+        lines.append(f"  [{SOFT_GREEN}]S{i}[/] {pad_str}{cells}  [bold {_c(avg)}]{avg:3.0f}%[/]")
 
-    lines += ["", f"  [{DIM}]P-CORES (performance)[/]"]
+    lines += ["", f"  [{DEEP_PURPL}]🚀 P-CORES[/] [{DIM}](performance)[/]"]
 
     for i in range(ds.P_CORES):
         idx  = ds.E_CORES + i
@@ -251,7 +337,7 @@ def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str
         pad = cols - len(vals)
         pad_str = f'[{DIM}]{" " * pad}[/]' if pad > 0 else ''
         avg = mean(vals) if vals else 0
-        lines.append(f"  [{DIM}]P{i:02d}[/] {pad_str}{cells}  [{_c(avg)}]{avg:3.0f}%[/]")
+        lines.append(f"  [{DEEP_PURPL}]P{i:02d}[/] {pad_str}{cells}  [bold {_c(avg)}]{avg:3.0f}%[/]")
 
     return "\n".join(lines)
 
@@ -260,19 +346,19 @@ def render_analytics(cpu_h: deque[float], mem_h: deque[float],
                      core_h: dict[int, deque[float]],
                      cpu_now: float, mem_now: float, load: float) -> str:
 
-    def stat_row(label: str, data: deque[float], unit: str = '%') -> str:
+    def stat_row(emoji: str, label: str, data: deque[float], unit: str = '%') -> str:
         vals = list(data)
         if not vals:
-            return f"   [{DIM}]{label:<16}[/]  [{DIM}]—[/]"
+            return f"   {emoji} [{DIM}]{label:<14}[/]  [{DIM}]—[/]"
         mn = min(vals); mx = max(vals); avg = mean(vals)
-        p95 = p_pct(vals, 0.95);  arr = trend_arrow(data)
+        p95 = p_pct(vals, 0.95);  arr = trend_emoji(data)
         col = _c(avg)
         return (
-            f"   [{DIM}]{label:<16}[/]"
-            f" [{GREEN}]{mn:5.1f}{unit}[/]"
-            f" [{col}]{avg:5.1f}{unit}[/]"
-            f" [{YELLOW}]{p95:5.1f}{unit}[/]"
-            f" [{RED}]{mx:5.1f}{unit}[/]"
+            f"   {emoji} [{DIM}]{label:<14}[/]"
+            f" [{LIME}]{mn:5.1f}{unit}[/]"
+            f" [bold {col}]{avg:5.1f}{unit}[/]"
+            f" [{ORANGE}]{p95:5.1f}{unit}[/]"
+            f" [{HOT_PINK}]{mx:5.1f}{unit}[/]"
             f" {arr}"
         )
 
@@ -293,6 +379,7 @@ def render_analytics(cpu_h: deque[float], mem_h: deque[float],
     # Health score + composite gauge
     hs, hc = health_score(cpu_now, mem_now, load)
     hs_bar = bar(hs, 24)
+    h_emoji = health_emoji(hs)
 
     # P/S efficiency ratio
     ratio_txt = '—'
@@ -300,74 +387,279 @@ def render_analytics(cpu_h: deque[float], mem_h: deque[float],
     if e_agg and p_agg:
         ratio = mean(p_agg[-10:]) / max(mean(e_agg[-10:]), 0.1)
         ratio_bar = bar(min(ratio * 20, 100), 18)
-        note = 'P heavy' if ratio > 3 else 'balanced' if ratio > 0.8 else 'S dominant'
-        ratio_txt = f"[{TEAL}]{ratio:.2f}×[/] [{DIM}]({note})[/]  [{TEAL}]{ratio_bar}[/]"
+        if ratio > 3:
+            note_emoji = "🚀"; note = "P heavy"
+        elif ratio > 0.8:
+            note_emoji = "⚖"; note = "balanced"
+        else:
+            note_emoji = "🍃"; note = "S dominant"
+        ratio_txt = f"{note_emoji} [bold {ELEC_BLUE}]{ratio:.2f}×[/] [{DIM}]({note})[/]  [{ELEC_BLUE}]{ratio_bar}[/]"
 
     lines = [
-        f"[bold {TEAL}]SYSTEM ANALYTICS[/]  [{DIM}]{len(cpu_h)} samples · {len(cpu_h)*2}s window[/]",
+        f"[bold {ELEC_BLUE}]📊 SYSTEM ANALYTICS[/]  [{DIM}]{len(cpu_h)} samples · {len(cpu_h)*2}s window[/]",
         "",
-        f"  [{hc}]{hs_bar}[/]  [{hc}]HEALTH {hs}/100[/]",
+        f"  [{hc}]{hs_bar}[/]  {h_emoji} [bold {hc}]HEALTH[/] [bold {WHITE}]{hs}[/][{DIM}]/100[/]",
         "",
-        f"  [{DIM}]━━ STATISTICS   min    avg    p95    max    trend[/]",
-        stat_row("Overall CPU",     cpu_h),
+        f"  [{DIM}]━━ STATISTICS     min    avg    p95    max   trend[/]",
+        stat_row("⚡", "Overall CPU",     cpu_h),
     ]
-    if e_dq: lines.append(stat_row("S-cluster (6E)",  e_dq))
-    if p_dq: lines.append(stat_row("P-cluster (12P)", p_dq))
-    lines.append(stat_row("RAM used",        mem_h))
+    if e_dq: lines.append(stat_row("🍃", "S-cluster (6E)",  e_dq))
+    if p_dq: lines.append(stat_row("🚀", "P-cluster (12P)", p_dq))
+    lines.append(stat_row("🧠", "RAM used",        mem_h))
     lines += [
         "",
-        f"  [{DIM}]━━ P/S EFFICIENCY RATIO[/]",
+        f"  [{DEEP_PURPL}]━━ P/S EFFICIENCY RATIO[/]",
         f"   {ratio_txt}",
         "",
-        f"  [{DIM}]━━ 2-MIN TIMELINE[/]",
-        f"  [{_c(cpu_now)}]{sparkline(cpu_h, 56)}[/]  [{DIM}]cpu[/]",
-        f"  [{_c(mem_now)}]{sparkline(mem_h, 56)}[/]  [{DIM}]ram[/]",
+        f"  [{ORANGE}]━━ 2-MIN TIMELINE[/]",
+        f"  [{_c(cpu_now)}]{sparkline(cpu_h, 56)}[/]  ⚡ [{DIM}]cpu[/]",
+        f"  [{_c(mem_now)}]{sparkline(mem_h, 56)}[/]  🧠 [{DIM}]ram[/]",
     ]
     return "\n".join(lines)
 
 
-# ── Rainbow title (HSV flow, light pastel) ─────────────────────────────────────
+# ── Rainbow title (HSV flow, light pastel + wave luminosity modulation) ───────
 RAINBOW_SAT     = 0.55   # 0=grey, 1=neon. 0.55 = leggero/pastel
-RAINBOW_VAL     = 1.00   # luminosità piena (uniforme su tutte le lettere)
+RAINBOW_VAL     = 1.00   # luminosità piena di base
 RAINBOW_SPREAD  = 0.07   # offset di hue tra una lettera e la successiva
 RAINBOW_SPEED   = 0.008  # incremento di phase per tick → 12.5s ciclo a 10fps
 RAINBOW_FPS_DT  = 0.10   # 100ms tick = 10fps (dentro polpo.tokens fps_target)
 
+# Wave modulation — onda di luce che scorre lungo il titolo
+WAVE_AMP        = 0.45   # ampiezza dim oscillation (0=no wave, 1=max dim a metà ciclo)
+WAVE_FREQ       = 0.32   # frequenza spaziale: ~3 lettere per ciclo, onda visibile
+WAVE_SPEED      = 2.0    # velocità di scorrimento dell'onda (× phase)
 
-def _rainbow_hex(idx: int, phase: float) -> str:
+
+def _rainbow_hex(idx: int, phase: float, wave: bool = True) -> str:
+    """HSV rainbow + optional wave luminosity modulation per letter.
+
+    Hue cambia spazialmente (idx) + temporalmente (phase) → flusso arcobaleno.
+    Quando wave=True, V (luminosità) oscilla con sin(2π·(idx·WAVE_FREQ - phase·WAVE_SPEED))
+    creando un'onda di luce che scorre lungo il testo.
+    """
     h = (idx * RAINBOW_SPREAD + phase) % 1.0
-    r, g, b = hsv_to_rgb(h, RAINBOW_SAT, RAINBOW_VAL)
+    if wave:
+        wave_y = math.sin(2 * math.pi * (idx * WAVE_FREQ - phase * WAVE_SPEED))
+        v = RAINBOW_VAL * (1.0 - WAVE_AMP * (1.0 - wave_y) * 0.5)
+    else:
+        v = RAINBOW_VAL
+    r, g, b = hsv_to_rgb(h, RAINBOW_SAT, v)
     return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
 
 
-def rainbow_text(text: str, phase: float) -> str:
+def rainbow_text(text: str, phase: float, wave: bool = True) -> str:
     out = []
     for i, ch in enumerate(text):
         if ch.isspace():
             out.append(ch)
         else:
-            out.append(f"[{_rainbow_hex(i, phase)}]{ch}[/]")
+            out.append(f"[{_rainbow_hex(i, phase, wave)}]{ch}[/]")
     return ''.join(out)
 
 
+def _format_uptime(secs: int) -> str:
+    if secs >= 86400:
+        d, rem = divmod(secs, 86400)
+        h = rem // 3600
+        return f"{d}d{h:02d}h"
+    if secs >= 3600:
+        h, rem = divmod(secs, 3600)
+        m = rem // 60
+        return f"{h}h{m:02d}m"
+    m, s = divmod(secs, 60)
+    return f"{m}m{s:02d}s"
+
+
+def _count_claude_mcp() -> dict[str, int]:
+    """Conta processi Claude (CLI sessions) e MCP server unique attivi.
+    Pattern detection robusto: name può essere version-renamed (cicatrice sess.1192:
+    psutil legge name='2.1.123' invece di 'claude' per CC).
+    MCP count = server unique distinti (NON instance × sessione, che farebbe N×M).
+    """
+    mcp_needles = (
+        '@modelcontextprotocol',
+        'whatsapp-mcp-ts',
+        'hostinger-api-mcp',
+        '@upstash/context7-mcp',
+        'youtube-transcript-mcp',
+        'mcp-servers/ghl',
+        'telegram-mcp',
+        'stripe-mcp',
+        'firecrawl-mcp',
+        'sentry-mcp',
+    )
+    claude_count = 0
+    mcp_unique: set[str] = set()
+    for p in psutil.process_iter(['name', 'cmdline']):
+        try:
+            name = (p.info.get('name') or '').lower()
+            cmdline_list = p.info.get('cmdline') or []
+            cmdline = ' '.join(cmdline_list).lower()
+
+            is_claude = (
+                name == 'claude'
+                or '/bin/claude' in cmdline
+                or '/.claude/local/claude' in cmdline
+                or (name and name.startswith('2.') and 'claude' in cmdline)
+            )
+            if is_claude:
+                claude_count += 1
+                continue
+
+            for needle in mcp_needles:
+                if needle in cmdline:
+                    mcp_unique.add(needle)
+                    break
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return {'claude': claude_count, 'mcp': len(mcp_unique)}
+
+
+def _claude_session_number() -> str:
+    """Best-effort lettura sessione corrente.
+    Probe paths in ordine: env CLAUDE_SESSION_N, active_claims.json (più recente),
+    session_current.md (multipli candidate path), session_history.md fallback.
+    """
+    env = os.environ.get("CLAUDE_SESSION_N")
+    if env:
+        return env
+
+    home = Path.home()
+    candidates = [
+        # active_claims preferito: live state, max claim = sessione corrente più recente
+        home / ".claude/active_claims.json",
+        home / "scripts/state/active_claims.json",
+        # session_current.md probable paths in ordine di freshness atteso
+        home / "projects/claude-memory/session_current.md",
+        home / "graphify-polpo-core/session_current.md",
+        home / ".claude/projects/-Users-mattiacalastri-Library-Mobile-Documents-com-apple-CloudDocs/sessions/session_current.md",
+        home / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Astra Digital Marketing/Sessioni/session_current.md",
+    ]
+
+    for path in candidates:
+        try:
+            if not path.exists():
+                continue
+            text = path.read_text(errors="ignore")
+            # active_claims.json (~/.claude/active_claims.json): array di dict
+            # con campo "claim" (numero sessione) o "session"
+            if path.suffix == ".json":
+                try:
+                    data = json.loads(text)
+                    items = data.get("claims") if isinstance(data, dict) else data
+                    if isinstance(items, list) and items:
+                        nums: list[int] = []
+                        for it in items:
+                            if not isinstance(it, dict):
+                                continue
+                            for key in ("claim", "session", "session_n", "n"):
+                                val = it.get(key)
+                                if val is not None and str(val).isdigit():
+                                    nums.append(int(val))
+                                    break
+                        if nums:
+                            return str(max(nums))
+                except (json.JSONDecodeError, ValueError, AttributeError):
+                    pass
+                continue
+            # markdown: cerca "sess.NNNN" o "Sessione #NNNN" o "# Session NNNN"
+            for line in text.splitlines()[:30]:
+                low = line.lower()
+                for token in low.replace(":", " ").replace("#", " ").replace(",", " ").split():
+                    if token.startswith("sess.") and token[5:].isdigit():
+                        return token[5:]
+                    if token.isdigit() and 1000 <= int(token) <= 9999:
+                        return token
+        except OSError:
+            continue
+    return "—"
+
+
+class ZoomControls(Vertical):
+    """Toggle zoom Ghostty: 2 button verticali fissi bottom-right.
+    Click '+' o '-' invia Cmd+/Cmd- al terminal corrente via osascript.
+    Funziona perché Ghostty intercetta Cmd+/- come font-size-up/down nativi.
+    """
+
+    DEFAULT_CSS = f"""
+    ZoomControls {{
+        dock: right;
+        width: 5;
+        height: 6;
+        align: center bottom;
+        background: transparent;
+        layer: overlay;
+        offset: -1 -1;
+    }}
+    ZoomControls Button {{
+        width: 3;
+        height: 3;
+        min-width: 3;
+        margin: 0;
+        padding: 0;
+        background: {BG_ALT};
+        color: {TEAL};
+        border: heavy {TEAL};
+        text-style: bold;
+    }}
+    ZoomControls Button:hover {{
+        background: {TEAL};
+        color: {BG};
+        border: heavy {CYAN};
+    }}
+    ZoomControls Button.-active {{
+        background: {CYAN};
+        color: {BG};
+    }}
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Button("+", id="zoom-in")
+        yield Button("−", id="zoom-out")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        key = "+" if event.button.id == "zoom-in" else "-"
+        try:
+            subprocess.Popen(
+                [
+                    "osascript", "-e",
+                    f'tell application "System Events" to keystroke "{key}" using command down'
+                ],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            pass
+
+
 class TitleBar(Static):
-    """Fascia titolo a 3 righe — emoji statica + titolo arcobaleno animato + status."""
+    """Fascia titolo centrata a 5 righe:
+    riga 1: emoji + titolo rainbow ad onda (centrato)
+    riga 2: subtitle hardware identity (centrato)
+    riga 3: rich info — sessione, uptime, # Claude, ora locale (centrato)
+    riga 4: status live — bat/cpu/load/ram pressure/disk/net (centrato)
+    riga 5: spacer
+    """
 
     DEFAULT_CSS = f"""
     TitleBar {{
-        height: 5;
+        height: 8;
         background: {BG};
-        padding: 1 3;
+        padding: 1 2;
         color: {FG};
+        border-top: heavy {TEAL};
         border-bottom: heavy {TEAL};
+        text-align: center;
+        content-align: center middle;
     }}
     """
 
     TITLE_TEXT = "M5 MAX WATCHER"
     EMOJI      = "🐙"
 
-    phase:  reactive[float] = reactive(0.0)
-    status: reactive[str]   = reactive("")
+    phase:     reactive[float] = reactive(0.0)
+    status:    reactive[str]   = reactive("")
+    rich_info: reactive[dict]  = reactive(dict)
 
     def on_mount(self) -> None:
         self.set_interval(RAINBOW_FPS_DT, self._tick)
@@ -382,17 +674,52 @@ class TitleBar(Static):
     def watch_status(self, _new: str) -> None:
         self._repaint()
 
+    def watch_rich_info(self, _new: dict) -> None:
+        self._repaint()
+
     def _repaint(self) -> None:
-        rainbow = rainbow_text(self.TITLE_TEXT, self.phase)
-        line1 = f"{self.EMOJI}  [bold]{rainbow}[/]"
-        line2 = self.status if self.status else f"[{DIM}]Probing system…[/]"
-        self.update(f"{line1}\n\n{line2}")
+        rainbow = rainbow_text(self.TITLE_TEXT, self.phase, wave=True)
+        line1 = (
+            f"{self.EMOJI}  "
+            f"[bold]{rainbow}[/]  "
+            f"{self.EMOJI}"
+        )
+
+        line2 = (
+            f"🍎 [{DIM}]Apple[/] [bold {ELEC_BLUE}]M5 Max[/]  "
+            f"[{DIM}]·[/]  💎 [bold {DEEP_PURPL}]18C[/] [{DIM}](6S+12P)[/]  "
+            f"[{DIM}]·[/]  🧠 [bold {LIME}]36GB[/] [{DIM}]Unified[/]"
+        )
+
+        info = self.rich_info or {}
+        sess = info.get('session', '—')
+        uptime = info.get('uptime', '—')
+        claude_n = info.get('claude_count', 0)
+        mcp_n = info.get('mcp_count', 0)
+        time_str = info.get('time', time.strftime("%H:%M:%S"))
+        sep = f"  [{DIM}]┃[/]  "
+        line3 = (
+            f"🎯 [{DIM}]sess[/] [bold {WHITE}]{sess}[/]"
+            f"{sep}⏱ [{DIM}]up[/] [bold {ELEC_BLUE}]{uptime}[/]"
+            f"{sep}🐙 [bold {HOT_PINK}]×{claude_n}[/]"
+            f"{sep}🔌 [bold {SOFT_GREEN}]×{mcp_n}[/]"
+            f"{sep}🕐 [bold {TEAL}]{time_str}[/]"
+        )
+
+        line4 = self.status if self.status else f"[{DIM}]🔄 Probing system…[/]"
+        self.update(f"{line1}\n{line2}\n{line3}\n{line4}")
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
 class M5Watcher(App):
-    TITLE     = "🐙 M5 MAX WATCHER"
-    SUB_TITLE = "Apple M5 Max · 18C (6S+12P) · 36GB Unified Memory"
+    """🐙 M5 MAX WATCHER · Astra Digital Marketing · Polpo Cockpit Suite
+
+    Real-time analytics TUI for Apple M5 Max. See module docstring for full spec.
+    Forged sess.1238 · v2.0.0 · 2026-05-02 · Polpo Data Viz Edition.
+    """
+
+    TITLE     = f"🐙 {__title__}"
+    SUB_TITLE = f"v{__version__} · Apple M5 Max · 18C (6S+12P) · 36GB Unified · {__company__}"
 
     CSS = f"""
     Screen {{
@@ -407,8 +734,17 @@ class M5Watcher(App):
     #cpu-panel, #mem-panel {{
         width: 1fr;
         border: heavy {TEAL};
-        padding: 1 1;
+        padding: 1 2;
+        margin: 0 1;
         background: {BG_ALT};
+    }}
+    #cpu-panel {{
+        border-title-color: {CYAN};
+        border-title-style: bold;
+    }}
+    #mem-panel {{
+        border-title-color: {MAG};
+        border-title-style: bold;
     }}
     #tab-area {{
         height: 1fr;
@@ -417,13 +753,16 @@ class M5Watcher(App):
     TabbedContent {{
         background: {BG};
     }}
+    TabbedContent Tabs {{
+        align-horizontal: center;
+    }}
     TabPane {{
         background: {BG};
         padding: 1 1;
     }}
     #heat-static, #analytics-static {{
         background: {BG_ALT};
-        border: heavy {DIM};
+        border: heavy {TEAL};
         padding: 1 2;
         height: 1fr;
     }}
@@ -469,6 +808,10 @@ class M5Watcher(App):
         }
         self._paused = False
         self._tick   = 0
+        # Header rich-info cache
+        self._boot_time   = psutil.boot_time()
+        self._sess_n      = _claude_session_number()
+        self._proc_counts = {'claude': 0, 'mcp': 0}
 
     # ── Layout ────────────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -484,11 +827,12 @@ class M5Watcher(App):
                 yield DataTable(id="tent-table", cursor_type="row", zebra_stripes=True)
         with Horizontal(id="top-row"):
             with ScrollableContainer(id="cpu-panel"):
-                yield Static(f"[bold {TEAL}]CPU — M5 Max 18C[/]\n[{DIM}]Probing…[/]",
+                yield Static(f"[bold {ELEC_BLUE}]⚡ CPU[/]  [{DIM}]· M5 Max 18C[/]\n[{DIM}]🔄 Probing…[/]",
                              id="cpu-content")
             with ScrollableContainer(id="mem-panel"):
-                yield Static(f"[bold {TEAL}]UNIFIED MEMORY 36GB[/]\n[{DIM}]Reading…[/]",
+                yield Static(f"[bold {LIME}]🧠 UNIFIED MEMORY[/]  [{DIM}]· 36GB[/]\n[{DIM}]🔄 Reading…[/]",
                              id="mem-content")
+        yield ZoomControls(id="zoom-controls")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -527,7 +871,7 @@ class M5Watcher(App):
         la1, _, _ = ds.load_avg()
 
         self.query_one("#cpu-content",   Static).update(
-            f"[bold {TEAL}]CPU — M5 Max 18C[/]\n" +
+            f"[bold {ELEC_BLUE}]⚡ CPU[/]  [{DIM}]· M5 Max 18C[/]\n" +
             render_cpu(self._cpu_percents, self._cpu_history, self._disk, self._net)
         )
         self.query_one("#heat-static",   Static).update(
@@ -542,16 +886,17 @@ class M5Watcher(App):
     async def _refresh_slow(self) -> None:
         if self._paused:
             return
-        self._mem, self._bat = await asyncio.gather(
+        self._mem, self._bat, self._proc_counts = await asyncio.gather(
             asyncio.to_thread(ds.unified_memory),
             asyncio.to_thread(ds.battery),
+            asyncio.to_thread(_count_claude_mcp),
         )
         self._mem_history.append(self._mem.get('pct', 0))
 
         cpu_avg = mean(self._cpu_percents) if self._cpu_percents else 0
         la1, _, _ = ds.load_avg()
         self.query_one("#mem-content", Static).update(
-            f"[bold {TEAL}]UNIFIED MEMORY 36GB[/]\n" +
+            f"[bold {LIME}]🧠 UNIFIED MEMORY[/]  [{DIM}]· 36GB[/]\n" +
             render_mem(self._mem, self._mem_history, cpu_avg, la1)
         )
         await self._update_processes()
@@ -577,19 +922,45 @@ class M5Watcher(App):
     def _update_subtitle(self, cpu: float, load: float) -> None:
         bat  = self._bat
         pct  = bat.get('pct', 100)
-        icon = '⚡' if bat.get('charging') else ('🔋' if pct > 20 else '🪫')
+        bat_emoji = '⚡' if bat.get('charging') else ('🔋' if pct > 20 else '🪫')
         prs  = self._mem.get('pressure', ('—', 'ok'))
-        pc   = {'ok': GREEN, 'info': TEAL, 'warning': YELLOW, 'error': RED}.get(prs[1], DIM)
+        pc   = {'ok': LIME, 'info': ELEC_BLUE, 'warning': ORANGE, 'error': HOT_PINK}.get(prs[1], DIM)
+        prs_emoji = {'ok': '🟢', 'info': '🔵', 'warning': '🟡', 'error': '🔴'}.get(prs[1], '⚪')
         d, n = self._disk, self._net
-        live = f'[{GREEN}]●[/]' if not self._paused else f'[{YELLOW}]‖[/]'
+        live = f'[bold {LIME}]🟢 LIVE[/]' if not self._paused else f'[bold {ORANGE}]⏸ PAUSE[/]'
+
+        free_gb = self._mem.get('free', 0) / 1024**3
+        swap_gb = self._mem.get('swap', 0) / 1024**3
+        comp_gb = self._mem.get('compressed', 0) / 1024**3
+        swap_color = HOT_PINK if swap_gb > 0.5 else (ORANGE if swap_gb > 0 else DIM)
+
+        sep = f"  [{DIM}]┃[/]  "
         status = (
-            f"{live} bat {pct}%{icon}  "
-            f"cpu {cpu:.0f}%  load {load:.1f}  "
-            f"ram [{pc}]{prs[0]}[/]  "
-            f"disk ↓{d.get('read', 0):.1f} ↑{d.get('write', 0):.1f}  "
-            f"net ↓{n.get('recv', 0):.2f} ↑{n.get('sent', 0):.2f} MB/s"
+            f"{live}"
+            f"{sep}{bat_emoji} [bold {LIME}]{pct}%[/]"
+            f"{sep}⚡ [bold {_c(cpu)}]{cpu:4.0f}%[/]"
+            f"{sep}⚖ [bold {_c(load / N_CORES * 100)}]{load:4.1f}[/]"
+            f"{sep}{prs_emoji} [bold {pc}]{prs[0]}[/] "
+            f"[{LIME}]{free_gb:.1f}G[/][{DIM}]free[/] "
+            f"[{ORANGE}]{comp_gb:.1f}G[/][{DIM}]z[/] "
+            f"[{swap_color}]{swap_gb:.1f}G[/][{DIM}]swp[/]"
+            f"{sep}💾 [{CYAN}]↓{d.get('read', 0):4.1f}[/] [{HOT_PINK}]↑{d.get('write', 0):4.1f}[/]"
+            f"{sep}🌐 [{CYAN}]↓{n.get('recv', 0):4.2f}[/] [{HOT_PINK}]↑{n.get('sent', 0):4.2f}[/]"
         )
-        self.query_one("#title-bar", TitleBar).status = status
+
+        # Rich-info header (refresh ogni tick fast)
+        uptime_s = int(time.time() - self._boot_time)
+        rich = {
+            'session':      self._sess_n,
+            'uptime':       _format_uptime(uptime_s),
+            'claude_count': self._proc_counts.get('claude', 0),
+            'mcp_count':    self._proc_counts.get('mcp', 0),
+            'time':         time.strftime("%H:%M:%S"),
+        }
+
+        title_bar = self.query_one("#title-bar", TitleBar)
+        title_bar.status = status
+        title_bar.rich_info = rich
 
     # ── Actions ───────────────────────────────────────────────────────────────
     async def action_force_refresh(self) -> None:
@@ -612,3 +983,10 @@ class M5Watcher(App):
 
 if __name__ == "__main__":
     M5Watcher().run()
+
+
+# ── End of file ───────────────────────────────────────────────────────────────
+# {__title__} v{__version__} — {__codename__}
+# Forged in {__forged_in__} · 2026-05-02 · {__company__}
+# {__copyright__}
+# ──────────────────────────────────────────────────────────────────────────────

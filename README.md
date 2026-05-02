@@ -8,7 +8,7 @@
 ![Textual](https://img.shields.io/badge/Textual-8.2.5-purple?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-black?logo=apple&logoColor=white)
 ![License](https://img.shields.io/badge/license-Proprietary-red)
-![Version](https://img.shields.io/badge/version-2.1.0-teal)
+![Version](https://img.shields.io/badge/version-2.3.0-teal)
 
 <div align="center">
 
@@ -16,9 +16,9 @@
 
 </div>
 
-**Version:** 2.1.0 · **Codename:** Polpo Data Viz Edition · **Released:** 2026-05-02
+**Version:** 2.3.0 · **Codename:** Polpo Data Viz Edition · **Released:** 2026-05-03
 **Author:** Mattia Calastri · **Company:** Astra Digital Marketing
-**Pillar:** Astra OS · Polpo Cockpit Suite · **Forged in:** sess.1238 · sess.1253 · sess.1269 · sess.1279 · sess.1301 · sess.1302
+**Pillar:** Astra OS · Polpo Cockpit Suite · **Forged in:** sess.1238 · sess.1253 · sess.1269 · sess.1279 · sess.1301 · sess.1302 · sess.1346 · sess.1350 · sess.1376
 
 ---
 
@@ -34,6 +34,9 @@ data from your Apple Silicon M5 Max:
 - **Top processes** by CPU + RAM
 - **Tentacoli** — Polpo background process map (Claude sessions, MCP servers,
   Jarvis voice daemon, watchdogs, dashboards)
+- **Vault Intelligence Panel** — Neural Density cockpit, wikilink graph, Data Attractors, Topologia
+- **KPI panel** — business vitals live from vault (MRR, outstanding, pipeline, setter metrics)
+- **Process Triage Advisor** — 40+ pattern KB with KILL_SAFE / CAUTIOUS / KEEP classification
 - **Header rich-info** — session number, uptime, claude×N, mcp×N, time, status
 
 ## Design philosophy
@@ -55,6 +58,7 @@ data from your Apple Silicon M5 Max:
 | 🔝 Processes | Top 16 by CPU + RAM |
 | 🐙 Tentacoli | Polpo background processes map |
 | 🕸 Graph | Vault Intelligence Panel — Neural Density cockpit, Data Attractors, Topologia |
+| 📊 KPI | Business vitals — MRR, outstanding, pipeline weighted, setter metrics |
 
 **Polpo Voice panel** (Heatmap tab, right column): mirrors JarvisToggle.app — OUT/IN/LOOP/DIALOG state pills,
 waveform sparkline from `stt_levels.bin`, active voice name, last 10 transcriptions.
@@ -66,7 +70,8 @@ waveform sparkline from `stt_levels.bin`, active voice name, last 10 transcripti
 | `q` | Quit |
 | `r` | Force refresh |
 | `p` | Toggle pause |
-| `1` `2` `3` `4` `5` | Switch tab (Heatmap / Analytics / Processes / Tentacoli / Graph) |
+| `1` `2` `3` `4` `5` `6` | Switch tab (Heatmap / Analytics / Processes / Tentacoli / Graph / KPI) |
+| `c` | Open Process Triage Advisor modal |
 | `f` | Cycle graph filter (all / moc / orphan) |
 | Click `+` `−` (bottom-right) | Zoom Ghostty terminal (delegates `Cmd+`/`Cmd-`) |
 
@@ -85,15 +90,23 @@ Or launch dedicated Ghostty window:
 open -na Ghostty.app --args -e ~/projects/m5-watcher/run.sh
 ```
 
+**Custom vault path** (Tab 🕸 Graph reads your Obsidian vault):
+
+```bash
+export M5_VAULT_PATH="/path/to/your/obsidian/vault"
+./run.sh
+```
+
 ## Architecture
 
 ```
 m5-watcher/
-├── app.py               # main Textual app — TUI, all widgets, voice panel, Tab 5
-├── data_sources.py      # psutil/sysctl wrappers — pure data layer
+├── app.py               # main Textual app — TUI, all widgets, voice panel, triage modal
+├── data_sources.py      # psutil/sysctl wrappers — pure data layer + triage KB
 ├── vault_parser.py      # wikilink extractor → NetworkX DiGraph + Neural Density
 ├── graph_widget.py      # Vault Intelligence Panel renderer (Rich markup)
-├── test_suite.py        # 64-test comprehensive suite (all modules)
+├── kpi_widget.py        # KPI tab — reads KPI.md frontmatter for business vitals
+├── test_suite.py        # comprehensive test suite (all modules)
 ├── polpo.tokens.json    # Polpo Design System palette
 ├── requirements.txt     # textual + psutil + networkx pinned
 ├── run.sh               # launcher
@@ -108,8 +121,8 @@ m5-watcher/
 └── voices.json          # voice display names
 
 # Obsidian vault (runtime, read-only — for Tab 5 🕸 Graph):
-~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Astra Digital Marketing/
-                         # vault_parser.py scans *.md recursively, cache TTL 60s
+# Set M5_VAULT_PATH env var to your vault root (default: ~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Vault)
+# vault_parser.py scans *.md recursively, cache TTL 60s
 ```
 
 **Refresh cadence:**
@@ -126,9 +139,9 @@ cd ~/projects/m5-watcher
 venv/bin/python test_suite.py
 ```
 
-64 tests across 9 classes — covers syntax, deps, all data sources, all renderers,
+Comprehensive suite across multiple classes — covers syntax, deps, all data sources, all renderers,
 vault_parser (live + error path), graph_widget (all filter modes), headless Textual
-compose + tab switch 1-5 + pause toggle.
+compose + tab switch 1-6 + pause toggle + triage KB.
 
 ## Visual language
 

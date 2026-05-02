@@ -242,10 +242,26 @@ class TestInternals(unittest.TestCase):
 class TestVaultParser(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from vault_parser import vault_graph_data
+        import os
         import networkx as nx
+        import vault_parser as _vpm
+
+        # Re-evaluate vault path at test time (respects M5_VAULT_PATH env var)
+        env_path = os.environ.get("M5_VAULT_PATH")
+        if env_path:
+            cls.vault = Path(env_path)
+        else:
+            cls.vault = _vpm.VAULT_PATH
+
+        cls.vault_available = cls.vault.exists() and any(cls.vault.rglob("*.md"))
+
+        # Bypass module-level cache so the test uses the resolved path
+        _vpm._cache = None
+        _vpm._cache_ts = 0.0
+
+        from vault_parser import vault_graph_data
         t0 = time.monotonic()
-        cls.data = vault_graph_data()
+        cls.data = vault_graph_data(vault=cls.vault)
         cls.parse_time = time.monotonic() - t0
         cls.nx = nx
 
@@ -253,11 +269,15 @@ class TestVaultParser(unittest.TestCase):
         self.assertIsInstance(self.data, dict)
 
     def test_stats_keys(self):
+        if not self.vault_available:
+            self.skipTest("vault not found — skipping live graph tests")
         stats = self.data.get("stats", {})
         for key in ("total", "orphans", "mocs", "edges", "visible"):
             self.assertIn(key, stats)
 
     def test_intel_keys(self):
+        if not self.vault_available:
+            self.skipTest("vault not found")
         intel = self.data.get("intel", {})
         for key in ("density", "clustering", "giant_ratio", "avg_degree",
                     "n_clusters", "recent_7d", "top_indegree", "top_bridges",
@@ -265,10 +285,14 @@ class TestVaultParser(unittest.TestCase):
             self.assertIn(key, intel, f"missing intel key: {key}")
 
     def test_node_count_realistic(self):
+        if not self.vault_available:
+            self.skipTest("vault not found")
         total = self.data["stats"]["total"]
         self.assertGreater(total, 2000, "vault seems too small")
 
     def test_edge_count_realistic(self):
+        if not self.vault_available:
+            self.skipTest("vault not found")
         edges = self.data["stats"]["edges"]
         self.assertGreater(edges, 5000, "too few edges")
 
@@ -277,6 +301,8 @@ class TestVaultParser(unittest.TestCase):
         self.assertIsInstance(G, self.nx.DiGraph)
 
     def test_top_indegree_format(self):
+        if not self.vault_available:
+            self.skipTest("vault not found")
         rows = self.data["intel"]["top_indegree"]
         self.assertGreater(len(rows), 0)
         name, in_d, out_d, ntype, bet = rows[0]
@@ -285,12 +311,16 @@ class TestVaultParser(unittest.TestCase):
         self.assertIsInstance(bet, float)
 
     def test_betweenness_second_brain(self):
+        if not self.vault_available:
+            self.skipTest("vault not found")
         rows = self.data["intel"]["top_indegree"]
         names = [r[0] for r in rows]
         self.assertTrue(any("Second Brain" in n or "KPI" in n or "session_current" in n
                             for n in names), f"expected key nodes, got: {names[:5]}")
 
     def test_top_bridges_present(self):
+        if not self.vault_available:
+            self.skipTest("vault not found")
         bridges = self.data["intel"]["top_bridges"]
         self.assertGreater(len(bridges), 0)
         name, score = bridges[0]

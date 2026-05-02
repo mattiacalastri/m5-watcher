@@ -1,4 +1,4 @@
-# 🐙 M5 Max Watcher v2.0.2 — Polpo Data Viz Edition
+# 🐙 M5 Max Watcher v2.3.0 — Polpo Data Viz Edition
 # Apple M5 Max · Astra Digital Marketing · Polpo Cockpit Suite
 #
 # Pinned to known-good versions. Bump cautiously and re-test rendering.

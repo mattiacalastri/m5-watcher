@@ -1099,7 +1099,7 @@ class M5Watcher(App):
         background: {BG};
         height: 3;
         width: auto;
-        margin: 0 auto;
+        margin: 0;
     }}
     Tab {{
         color: {DIM};

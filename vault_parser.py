@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -11,10 +12,10 @@ import networkx as nx
 
 _SEMANTIC_AREAS_PATH = Path(__file__).parent / "semantic_areas.json"
 
-VAULT_PATH = (
-    Path.home()
-    / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Astra Digital Marketing"
+_default_vault = (
+    Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Vault"
 )
+VAULT_PATH = Path(os.environ.get("M5_VAULT_PATH", str(_default_vault)))
 _WIKILINK  = re.compile(r'\[\[([^\[\]|#\n]+?)(?:[|#][^\[\]]*?)?\]\]')
 _STATUS_RE = re.compile(r'^status:\s*["\']?(\w+)["\']?\s*$', re.MULTILINE)
 
@@ -46,12 +47,22 @@ def _classify(G: nx.DiGraph, node: str) -> str:
     return "normal"
 
 
-def vault_graph_data(vault: Path = VAULT_PATH) -> dict:
-    """Parse vault → graph + Neural Density metrics. Safe for asyncio.to_thread."""
+def vault_graph_data(vault: Path | None = None) -> dict:
+    """Parse vault → graph + Neural Density metrics. Safe for asyncio.to_thread.
+
+    vault path resolution (in order):
+      1. explicit `vault` argument
+      2. M5_VAULT_PATH env var
+      3. VAULT_PATH module constant (set from env at import time)
+    """
     global _cache, _cache_ts
     now = time.monotonic()
     if _cache and now - _cache_ts < CACHE_TTL:
         return _cache
+
+    if vault is None:
+        env_path = os.environ.get("M5_VAULT_PATH")
+        vault = Path(env_path) if env_path else VAULT_PATH
 
     G: nx.DiGraph            = nx.DiGraph()
     stem_index: dict[str, str] = {}

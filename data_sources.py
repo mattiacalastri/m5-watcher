@@ -511,15 +511,47 @@ def current_focus() -> dict:
                 active_task = title[:72]
                 break
 
+        # ── P0 actions from "Prossime azioni" ────────────────────────────
+        p0_actions: list[str] = []
+        in_prossime = False
+        for ln in lines:
+            if ln.startswith('## Prossime azioni'):
+                in_prossime = True
+                continue
+            if in_prossime and ln.startswith('## '):
+                break
+            if in_prossime and ln.startswith('- P0'):
+                body = ln[2:].strip()
+                p0_actions.append(body[:80])
+                if len(p0_actions) >= 4:
+                    break
+
+        # ── Key blockers from "Blocchi attivi" ───────────────────────────
+        blocchi: list[str] = []
+        in_blocchi = False
+        for ln in lines:
+            if ln.startswith('## Blocchi attivi'):
+                in_blocchi = True
+                continue
+            if in_blocchi and ln.startswith('## '):
+                break
+            if in_blocchi and ln.startswith('- '):
+                body = ln[2:].strip().split(' ---')[0].strip()
+                blocchi.append(body[:72])
+                if len(blocchi) >= 3:
+                    break
+
         result = {
             'session_str':  session_str,
             'tesi':         tesi[:90] if tesi else '',
             'active_task':  active_task,
             'active_label': active_label,
             'updated_ts':   updated_ts,
+            'p0_actions':   p0_actions,
+            'blocchi':      blocchi,
         }
         _FOCUS_CACHE = result
         _FOCUS_TIME  = now
         return result
 
-    return {'session_str': '—', 'tesi': '', 'active_task': '', 'active_label': '', 'updated_ts': ''}
+    return {'session_str': '—', 'tesi': '', 'active_task': '', 'active_label': '', 'updated_ts': '', 'p0_actions': [], 'blocchi': []}

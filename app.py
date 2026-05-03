@@ -51,6 +51,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import time
 from collections import deque
 from colorsys import hsv_to_rgb
@@ -115,7 +116,7 @@ BAR8  = ' ▏▎▍▌▋▊▉█'   # 9-step smooth fill
 SPARK = ' ▁▂▃▄▅▆▇█'   # 9-step sparkline
 
 HEAT_MAP = [           # (char, color) by intensity 0-7
-    (' ',  DIM),   ('░', DIM),
+    ('·',  DIM),   ('░', DIM),
     ('▒',  CYAN),  ('▒', TEAL),
     ('▓',  YELLOW),('▓', SCAR),
     ('█',  RED),   ('█', MAG),
@@ -562,12 +563,14 @@ _LABEL_COLOR = {
 
 
 def render_focus(fd: dict) -> str:
-    """Render 🎯 FOCUS panel — current active task + last session tesi."""
-    sess     = fd.get('session_str', '—')
-    tesi     = fd.get('tesi', '')
-    task     = fd.get('active_task', '')
-    label    = fd.get('active_label', '')
-    updated  = fd.get('updated_ts', '')
+    """Render 🎯 FOCUS + 🚨 RADAR panel — active task, P0 actions, blockers."""
+    sess       = fd.get('session_str', '—')
+    tesi       = fd.get('tesi', '')
+    task       = fd.get('active_task', '')
+    label      = fd.get('active_label', '')
+    updated    = fd.get('updated_ts', '')
+    p0_actions = fd.get('p0_actions', [])
+    blocchi    = fd.get('blocchi', [])
 
     label_col = _LABEL_COLOR.get(label.upper(), CYAN)
     label_str = (f" [{label_col}][{label}][/]" if label else '')
@@ -591,6 +594,27 @@ def render_focus(fd: dict) -> str:
         lines.append(tesi_line)
     if updated_str:
         lines.append(updated_str)
+
+    # ── P0 Radar ─────────────────────────────────────────────────────────
+    if p0_actions:
+        lines.append("")
+        lines.append(f"[bold {HOT_PINK}]🚨 P0 RADAR[/]  [{DIM}]· prossime azioni critiche[/]")
+        for action in p0_actions:
+            # Highlight time markers (Lunedi, Martedi, HH:MM patterns)
+            highlighted = re.sub(
+                r'(Lunedi|Martedi|Mercoledi|Giovedi|Venerdi|Sabato|Domenica|\d{2}:\d{2})',
+                lambda m: f'[{YELLOW}]{m.group()}[/]',
+                action
+            )
+            lines.append(f"  [{HOT_PINK}]▸[/] {highlighted}")
+
+    # ── Blocchi ──────────────────────────────────────────────────────────
+    if blocchi:
+        lines.append("")
+        lines.append(f"[bold {ORANGE}]⛔ BLOCCHI[/]  [{DIM}]· cosa rallenta[/]")
+        for b in blocchi:
+            lines.append(f"  [{ORANGE}]·[/] [{DIM}]{b}[/]")
+
     return "\n".join(lines)
 
 
@@ -1241,7 +1265,11 @@ class M5Watcher(App):
         border: heavy {HOT_PINK};
         padding: 1 3;
         height: 1fr;
-        overflow: hidden hidden;
+    }}
+    #focus-static {{
+        height: auto;
+        max-height: 18;
+        margin-bottom: 1;
     }}
     """
 
@@ -1267,10 +1295,10 @@ class M5Watcher(App):
         self._bat:          dict                       = {}
         self._disk:         dict                       = {}
         self._net:          dict                       = {}
-        self._cpu_history:  deque[float]               = deque(maxlen=60)
-        self._mem_history:  deque[float]               = deque(maxlen=60)
+        self._cpu_history:  deque[float]               = deque(maxlen=100)
+        self._mem_history:  deque[float]               = deque(maxlen=100)
         self._core_history: dict[int, deque[float]]    = {
-            i: deque(maxlen=60) for i in range(N_CORES)
+            i: deque(maxlen=100) for i in range(N_CORES)
         }
         self._paused = False
         self._tick   = 0

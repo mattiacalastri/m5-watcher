@@ -7,7 +7,9 @@ Copertura:
   - App internals (_count_claude_mcp, _claude_session_number)
   - vault_parser (vault_graph_data — Neural Density cockpit)
   - graph_widget (render_graph — tutti i filtri + error path)
-  - Headless Textual (compose + tab switch 1-5 + pause toggle)
+  - kpi_widget (read_kpi_data + render_kpi)
+  - data_sources.log_feed (tail, clean_msg, make_title, dedup)
+  - Headless Textual (compose + tab switch 1-7 + pause toggle)
 
 Run: venv/bin/python test_suite.py
 """
@@ -28,6 +30,10 @@ ROOT = Path(__file__).parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import graph_widget as _gw
+import kpi_widget   as _kw
+import vault_parser as _vp
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. SYNTAX
@@ -41,6 +47,7 @@ class TestSyntax(unittest.TestCase):
     def test_data_sources_syntax(self): self._ok("data_sources.py")
     def test_vault_parser_syntax(self): self._ok("vault_parser.py")
     def test_graph_widget_syntax(self): self._ok("graph_widget.py")
+    def test_kpi_widget_syntax(self):   self._ok("kpi_widget.py")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -360,10 +367,6 @@ class TestVaultParser(unittest.TestCase):
 # 8. GRAPH WIDGET — render_graph
 # ─────────────────────────────────────────────────────────────────────────────
 
-import graph_widget as _gw
-import vault_parser as _vp
-
-
 class TestGraphWidget(unittest.TestCase):
     _gdata: dict = {}
 
@@ -448,15 +451,15 @@ class TestHeadlessTextual(unittest.IsolatedAsyncioTestCase):
         async with M5Watcher().run_test(headless=True) as pilot:
             self.assertIsNotNone(pilot.app)
 
-    async def test_tab_switch_1_to_5(self):
+    async def test_tab_switch_1_to_7(self):
         from app import M5Watcher
         from textual.widgets import TabbedContent
         async with M5Watcher().run_test(headless=True) as pilot:
-            for key in ("1", "2", "3", "4", "5"):
+            for key in ("1", "2", "3", "4", "5", "6", "7"):
                 await pilot.press(key)
                 await pilot.pause(0.05)
             tc = pilot.app.query_one(TabbedContent)
-            self.assertEqual(tc.active, "tab-graph")
+            self.assertEqual(tc.active, "tab-logs")
 
     async def test_pause_toggle(self):
         from app import M5Watcher
@@ -481,6 +484,89 @@ class TestHeadlessTextual(unittest.IsolatedAsyncioTestCase):
             after = pilot.app._graph_filter
             modes = list(graph_widget.FILTER_MODES)
             self.assertEqual(after, modes[(modes.index(initial) + 1) % len(modes)])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. KPI WIDGET
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestKpiWidget(unittest.TestCase):
+    def test_read_kpi_data_missing_path(self):
+        result = _kw.read_kpi_data(path=Path("/tmp/nonexistent_kpi_polpo_test.md"))
+        self.assertIsInstance(result, dict)
+
+    def test_render_kpi_empty(self):
+        result = _kw.render_kpi({})
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 0)
+
+    def test_render_kpi_with_mrr(self):
+        result = _kw.render_kpi({'mrr': 5000, 'outstanding': 1200, 'pipeline_weighted': 3500})
+        self.assertIn("5", result)
+
+    def test_render_kpi_returns_str(self):
+        self.assertIsInstance(_kw.render_kpi({}), str)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. LOG FEED
+# ─────────────────────────────────────────────────────────────────────────────
+
+import data_sources as _ds
+
+
+class TestLogFeed(unittest.TestCase):
+    def test_log_feed_returns_list(self):
+        result = _ds.log_feed()
+        self.assertIsInstance(result, list)
+
+    def test_log_feed_entry_keys(self):
+        result = _ds.log_feed()
+        for entry in result[:5]:
+            for key in ('ts', 'emoji', 'title', 'source', 'desc'):
+                self.assertIn(key, entry)
+
+    def test_log_feed_empty_sources(self):
+        """No crash when all log paths are missing."""
+        orig = _ds._LOG_SOURCES
+        _ds._LOG_SOURCES = [("/tmp/nonexistent_polpo_test_abc123.log", "🔥", "Test")]
+        try:
+            result = _ds.log_feed()
+            self.assertEqual(result, [])
+        finally:
+            _ds._LOG_SOURCES = orig
+
+    def test_clean_msg_strips_timestamp_prefix(self):
+        line = "[2026-05-03T20:45:24.208] info | lead ricevuto dal form"
+        msg = _ds._clean_msg(line)
+        self.assertNotIn("2026-05-03", msg)
+        self.assertGreater(len(msg), 3)
+
+    def test_make_title_short_line(self):
+        title = _ds._make_title("lead ricevuto")
+        self.assertEqual(title, "lead ricevuto")
+
+    def test_make_title_splits_on_separator(self):
+        title = _ds._make_title("GHL Alert: nuovo lead da Facebook")
+        self.assertEqual(title, "GHL Alert")
+
+    def test_tail_reads_last_lines(self):
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False) as f:
+            for i in range(100):
+                f.write(f"line {i}\n")
+            fname = f.name
+        try:
+            lines = _ds._tail(Path(fname), 10)
+            self.assertEqual(len(lines), 10)
+            self.assertIn("line 99", lines[-1])
+        finally:
+            Path(fname).unlink(missing_ok=True)
+
+    def test_ts_float_valid(self):
+        self.assertAlmostEqual(_ds._ts_float("01:30:00", 0), 5400.0)
+
+    def test_ts_float_invalid(self):
+        self.assertEqual(_ds._ts_float("", 42.0), 42.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

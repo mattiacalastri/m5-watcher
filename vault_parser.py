@@ -134,14 +134,10 @@ def vault_graph_data(vault: Path | None = None) -> dict:
     mocs    = sum(1 for n in G.nodes if G.nodes[n]["type"] == "moc")
     edges   = G.number_of_edges()
 
-    # Spring layout on top-N (kept for backward compat)
     ranked  = sorted(G.nodes, key=lambda n: G.degree(n), reverse=True)
     visible = ranked[:TOP_N]
     sub     = G.subgraph(visible)
-    pos     = (
-        nx.spring_layout(sub, k=1.8, iterations=40, seed=42)
-        if len(sub) > 1 else {}
-    )
+    pos     = {}
 
     # ── Neural Density — betweenness first (scores needed for data attractors) ──
     bet_scores: dict[str, float] = {}

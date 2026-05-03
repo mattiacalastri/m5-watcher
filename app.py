@@ -53,6 +53,7 @@ import json
 import math
 import os
 import re
+import threading
 import time
 from collections import deque
 from colorsys import hsv_to_rgb
@@ -564,6 +565,10 @@ _LABEL_COLOR = {
     'DONE':         DIM,
 }
 
+_P0_HIGHLIGHT_RE = re.compile(
+    r'(Lunedi|Martedi|Mercoledi|Giovedi|Venerdi|Sabato|Domenica|\d{2}:\d{2})'
+)
+
 
 def render_focus(fd: dict) -> str:
     """Render 🎯 FOCUS + 🚨 RADAR panel — active task, P0 actions, blockers."""
@@ -604,8 +609,7 @@ def render_focus(fd: dict) -> str:
         lines.append(f"[bold {HOT_PINK}]🚨 P0 RADAR[/]  [{DIM}]· prossime azioni critiche[/]")
         for action in p0_actions:
             # Highlight time markers (Lunedi, Martedi, HH:MM patterns)
-            highlighted = re.sub(
-                r'(Lunedi|Martedi|Mercoledi|Giovedi|Venerdi|Sabato|Domenica|\d{2}:\d{2})',
+            highlighted = _P0_HIGHLIGHT_RE.sub(
                 lambda m: f'[{YELLOW}]{m.group()}[/]',
                 action
             )
@@ -1160,8 +1164,8 @@ class M5Watcher(App):
     }}
     #top-row {{
         height: auto;
-        min-height: 16;
-        max-height: 24;
+        min-height: 14;
+        max-height: 18;
     }}
     #cpu-panel, #mem-panel {{
         width: 1fr;
@@ -1375,7 +1379,7 @@ class M5Watcher(App):
             with TabPane("🌡 Heatmap", id="tab-heat"):
                 with Horizontal(id="heat-row"):
                     yield Static(f"[{DIM}]Accumulating core samples…[/]", id="heat-static")
-                    yield Static(render_voice(voice_data()), id="voice-static")
+                    yield Static(f"[{DIM}]🔄 Loading voice…[/]", id="voice-static")
             with TabPane("📈 Analytics", id="tab-stats"):
                 yield Static(f"[{DIM}]Building statistics…[/]", id="analytics-static")
             with TabPane("🔝 Processes", id="tab-procs"):
@@ -1467,8 +1471,9 @@ class M5Watcher(App):
         self._center_tabs()
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
-        is_graph = event.pane is not None and event.pane.id == "tab-graph"
-        self.query_one("#top-row").display = not is_graph
+        fullscreen_tabs = {"tab-graph", "tab-logs"}
+        hide = event.pane is not None and event.pane.id in fullscreen_tabs
+        self.query_one("#top-row").display = not hide
 
     async def on_mount(self) -> None:
         self._init_tables()
@@ -1535,7 +1540,7 @@ class M5Watcher(App):
                              self._core_history, overall, mem_now, la1,
                              spark_w=self._spark_width())
         )
-        vd = voice_data()
+        vd = await asyncio.to_thread(voice_data)
         self.query_one("#voice-static", Static).update(
             render_voice(vd, level_w=self._voice_width())
         )
@@ -1555,13 +1560,15 @@ class M5Watcher(App):
     async def _refresh_slow(self) -> None:
         if self._paused:
             return
-        self._mem, self._bat, self._proc_counts, self._graph_data, self._kpi_data, self._focus_data = await asyncio.gather(
+        (self._mem, self._bat, self._proc_counts, self._graph_data,
+         self._kpi_data, self._focus_data, self._log_entries) = await asyncio.gather(
             asyncio.to_thread(ds.unified_memory),
             asyncio.to_thread(ds.battery),
             asyncio.to_thread(_count_claude_mcp),
             asyncio.to_thread(vault_parser.vault_graph_data),
             asyncio.to_thread(kpi_widget.read_kpi_data),
             asyncio.to_thread(ds.current_focus),
+            asyncio.to_thread(ds.log_feed),
         )
         self._mem_history.append(self._mem.get('pct', 0))
 
@@ -1641,10 +1648,9 @@ class M5Watcher(App):
         self.query_one("#kpi-static", Static).update(
             kpi_widget.render_kpi(self._kpi_data)
         )
-        await self._refresh_logs()
+        self._render_logs(self._log_entries)
 
-    async def _refresh_logs(self) -> None:
-        entries = await asyncio.to_thread(ds.log_feed)
+    def _render_logs(self, entries: list) -> None:
         lt = self.query_one("#log-table", DataTable)
         lt.clear()
         _SRC_COLOR = {

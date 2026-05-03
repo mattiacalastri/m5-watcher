@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -50,6 +51,8 @@ def unified_memory() -> dict:
             pages[m.group(1).strip()] = int(m.group(2)) * PAGE_SIZE
 
     total = psutil.virtual_memory().total
+    if total == 0:
+        total = 1
     wired      = pages.get('Pages wired down', 0)
     active     = pages.get('Pages active', 0)
     inactive   = pages.get('Pages inactive', 0)
@@ -146,45 +149,47 @@ def tentacoli() -> list[dict]:
 
 _disk_snap: object = None
 _disk_time: float  = 0.0
+_disk_lock = threading.Lock()
 _net_snap:  object = None
 _net_time:  float  = 0.0
+_net_lock  = threading.Lock()
 
 
 def disk_io_rate() -> dict[str, float]:
     """MB/s read + write since last call."""
-    import time
     global _disk_snap, _disk_time
     now = time.monotonic()
     curr = psutil.disk_io_counters()
     if curr is None:
         return {'read': 0.0, 'write': 0.0}
-    dt = now - _disk_time if _disk_time else 1.0
-    if _disk_snap and dt > 0:
-        r = (curr.read_bytes  - _disk_snap.read_bytes)  / 1024 / 1024 / dt
-        w = (curr.write_bytes - _disk_snap.write_bytes) / 1024 / 1024 / dt
-    else:
-        r = w = 0.0
-    _disk_snap = curr
-    _disk_time = now
+    with _disk_lock:
+        dt = now - _disk_time if _disk_time else 1.0
+        if _disk_snap and dt > 0:
+            r = (curr.read_bytes  - _disk_snap.read_bytes)  / 1024 / 1024 / dt
+            w = (curr.write_bytes - _disk_snap.write_bytes) / 1024 / 1024 / dt
+        else:
+            r = w = 0.0
+        _disk_snap = curr
+        _disk_time = now
     return {'read': max(0.0, r), 'write': max(0.0, w)}
 
 
 def net_io_rate() -> dict[str, float]:
     """MB/s sent + recv since last call (all interfaces, excluding loopback)."""
-    import time
     global _net_snap, _net_time
     now = time.monotonic()
     curr = psutil.net_io_counters(pernic=False)
     if curr is None:
         return {'sent': 0.0, 'recv': 0.0}
-    dt = now - _net_time if _net_time else 1.0
-    if _net_snap and dt > 0:
-        s = (curr.bytes_sent - _net_snap.bytes_sent) / 1024 / 1024 / dt
-        r = (curr.bytes_recv - _net_snap.bytes_recv) / 1024 / 1024 / dt
-    else:
-        s = r = 0.0
-    _net_snap = curr
-    _net_time = now
+    with _net_lock:
+        dt = now - _net_time if _net_time else 1.0
+        if _net_snap and dt > 0:
+            s = (curr.bytes_sent - _net_snap.bytes_sent) / 1024 / 1024 / dt
+            r = (curr.bytes_recv - _net_snap.bytes_recv) / 1024 / 1024 / dt
+        else:
+            s = r = 0.0
+        _net_snap = curr
+        _net_time = now
     return {'sent': max(0.0, s), 'recv': max(0.0, r)}
 
 
@@ -654,13 +659,23 @@ def _ts_float(ts: str, fallback: float) -> float:
         return fallback
 
 
+_log_feed_cache: list[dict] = []
+_log_feed_ts: float = 0.0
+_LOG_FEED_TTL = 5.0
+
+
 def log_feed(max_per_source: int = 25) -> list[dict]:
     """Aggregate log entries from all Polpo sources, newest-first.
 
     Each entry: {ts, time_sort, emoji, title, source, desc}
     """
+    global _log_feed_cache, _log_feed_ts
+    now = time.monotonic()
+    if now - _log_feed_ts < _LOG_FEED_TTL:
+        return _log_feed_cache
+
     entries: list[dict] = []
-    fallback_t = _time.time() % 86400  # seconds since midnight as float
+    fallback_t = _time.time()
 
     for raw_path, emoji, label in _LOG_SOURCES:
         path = Path(raw_path).expanduser()
@@ -668,7 +683,7 @@ def log_feed(max_per_source: int = 25) -> list[dict]:
             continue
         try:
             lines = _tail(path, max_per_source)
-            file_ts = path.stat().st_mtime % 86400
+            file_ts = path.stat().st_mtime
         except OSError:
             continue
 
@@ -704,4 +719,6 @@ def log_feed(max_per_source: int = 25) -> list[dict]:
             seen.add(key)
             deduped.append(e)
 
-    return deduped[:150]
+    _log_feed_cache = deduped[:150]
+    _log_feed_ts = now
+    return _log_feed_cache

@@ -61,7 +61,7 @@ from statistics import mean
 import psutil
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual import events
@@ -717,6 +717,16 @@ def render_voice(vd: dict, level_w: int = 40) -> str:
     return "\n".join(lines)
 
 
+def render_feed(feed: deque) -> str:
+    """Unified event feed — timestamped system transitions."""
+    if not feed:
+        return f"\n  [{DIM}]no events yet…[/]"
+    lines = [""]
+    for line in feed:
+        lines.append(f"  {line}")
+    return "\n".join(lines)
+
+
 # ── Rainbow title (HSV flow, light pastel + wave luminosity modulation) ───────
 RAINBOW_SAT     = 0.55   # 0=grey, 1=neon. 0.55 = leggero/pastel
 RAINBOW_VAL     = 1.00   # luminosità piena di base
@@ -1164,6 +1174,21 @@ class M5Watcher(App):
     #mem-panel {{
         border-title-color: {MAG};
         border-title-style: bold;
+        height: 3fr;
+    }}
+    #mem-col {{
+        width: 1fr;
+        layout: vertical;
+    }}
+    #feed-panel {{
+        height: 1fr;
+        padding: 1 3;
+        margin: 0;
+        background: {BG_ALT};
+        border: heavy {ORANGE};
+        border-title-color: {ORANGE};
+        border-title-style: bold;
+        overflow-y: auto;
     }}
     #tab-area {{
         height: 1fr;
@@ -1310,6 +1335,11 @@ class M5Watcher(App):
         self._proc_counts = {'claude': 0, 'mcp': 0}
         self._kpi_data:     dict                       = {}
         self._focus_data:   dict                       = {}
+        # Unified feed — state transition log
+        self._event_feed:   deque[str]                 = deque(maxlen=15)
+        self._prev_pressure: str                       = ''
+        self._prev_swap_active: bool                   = False
+        self._cpu_spike_ticks: int                     = 0
         # Responsive layout — updated on terminal resize
         self._cols: int = 120
         self._rows: int = 40
@@ -1355,12 +1385,18 @@ class M5Watcher(App):
                     f"[italic {DIM}]Where silicon thinks — six leaves of efficiency, twelve rockets of performance.[/]\n"
                     f"[{DIM}]🔄 Probing…[/]",
                     id="cpu-content")
-            with ScrollableContainer(id="mem-panel"):
-                yield Static(
-                    f"[bold {LIME}]🧠 UNIFIED MEMORY[/]  [{DIM}]· 36GB[/]\n"
-                    f"[italic {DIM}]One pool, no walls — Apple unified architecture observed as a single organism.[/]\n"
-                    f"[{DIM}]🔄 Reading…[/]",
-                    id="mem-content")
+            with Vertical(id="mem-col"):
+                with ScrollableContainer(id="mem-panel"):
+                    yield Static(
+                        f"[bold {LIME}]🧠 UNIFIED MEMORY[/]  [{DIM}]· 36GB[/]\n"
+                        f"[italic {DIM}]One pool, no walls — Apple unified architecture observed as a single organism.[/]\n"
+                        f"[{DIM}]🔄 Reading…[/]",
+                        id="mem-content")
+                with ScrollableContainer(id="feed-panel"):
+                    yield Static(
+                        f"[bold {ORANGE}]⚡ UNIFEED[/]  [{DIM}]· M5 Max events[/]\n"
+                        f"[{DIM}]no events yet…[/]",
+                        id="feed-static")
         yield Footer()
 
     # ── Responsive helpers ────────────────────────────────────────────────────
@@ -1412,6 +1448,9 @@ class M5Watcher(App):
         await asyncio.to_thread(ds.net_io_rate)
         self.set_interval(2.0, self._refresh_fast)
         self.set_interval(5.0, self._refresh_slow)
+        # Immediate initial load — all panels (incl. Graph + KPI) visible on startup
+        await self._refresh_fast()
+        await self._refresh_slow()
 
     def _init_tables(self) -> None:
         pt = self.query_one("#proc-table", DataTable)
@@ -1435,6 +1474,21 @@ class M5Watcher(App):
         for i, v in enumerate(self._cpu_percents):
             if i in self._core_history:
                 self._core_history[i].append(v)
+
+        # ── Feed: sustained CPU spike (>80% avg for 3 consecutive ticks = 6s)
+        if overall >= 80:
+            self._cpu_spike_ticks += 1
+            if self._cpu_spike_ticks == 3:
+                ts = time.strftime("%H:%M:%S")
+                self._event_feed.appendleft(
+                    f"[{DIM}]{ts}[/] 🔥 [{HOT_PINK}]CPU spike[/] [{DIM}]{overall:.0f}% avg[/]"
+                )
+                self.query_one("#feed-static", Static).update(
+                    f"[bold {ORANGE}]⚡ UNIFEED[/]  [{DIM}]· M5 Max events[/]" +
+                    render_feed(self._event_feed)
+                )
+        else:
+            self._cpu_spike_ticks = 0
 
         mem_now = self._mem.get('pct', 0)
         la1, _, _ = ds.load_avg()
@@ -1469,6 +1523,41 @@ class M5Watcher(App):
         )
         self._mem_history.append(self._mem.get('pct', 0))
 
+        # ── Feed: detect memory pressure transitions
+        ts = time.strftime("%H:%M:%S")
+        new_pressure = self._mem.get('pressure', ('', 'ok'))[1]
+        if self._prev_pressure and new_pressure != self._prev_pressure:
+            _pcolor  = {'ok': LIME, 'info': ELEC_BLUE, 'warning': ORANGE, 'error': HOT_PINK}
+            _pemoji  = {'ok': '🟢', 'info': '🔵', 'warning': '🟡', 'error': '🔴'}
+            _plabel  = {'ok': 'NORMAL', 'info': 'MODERATE', 'warning': 'HIGH', 'error': 'CRITICAL'}
+            c = _pcolor.get(new_pressure, DIM)
+            e = _pemoji.get(new_pressure, '⚫')
+            self._event_feed.appendleft(
+                f"[{DIM}]{ts}[/] {e} [{c}]pressure[/] "
+                f"[{DIM}]{_plabel.get(self._prev_pressure, self._prev_pressure)}"
+                f" → {_plabel.get(new_pressure, new_pressure)}[/]"
+            )
+        self._prev_pressure = new_pressure
+
+        # ── Feed: detect swap activation / deactivation
+        swap_active = self._mem.get('swap', 0) > 0
+        if swap_active != self._prev_swap_active:
+            if swap_active:
+                swap_gb = self._mem.get('swap', 0) / 1024**3
+                self._event_feed.appendleft(
+                    f"[{DIM}]{ts}[/] 🟠 [{ORANGE}]swap activated[/] [{DIM}]+{swap_gb:.1f}GB[/]"
+                )
+            else:
+                self._event_feed.appendleft(
+                    f"[{DIM}]{ts}[/] 🟢 [{LIME}]swap cleared[/]"
+                )
+        self._prev_swap_active = swap_active
+
+        self.query_one("#feed-static", Static).update(
+            f"[bold {ORANGE}]⚡ UNIFEED[/]  [{DIM}]· M5 Max events[/]" +
+            render_feed(self._event_feed)
+        )
+
         cpu_avg = mean(self._cpu_percents) if self._cpu_percents else 0
         la1, _, _ = ds.load_avg()
         _mem_total_gb = self._mem.get('total', 0) / 1024 ** 3
@@ -1479,7 +1568,14 @@ class M5Watcher(App):
         )
         await self._update_processes()
         self.query_one("#graph-static", Static).update(
-            graph_widget.render_graph(self._graph_data, filter_mode=self._graph_filter)
+            graph_widget.render_graph(
+                self._graph_data,
+                filter_mode=self._graph_filter,
+                cpu_percents=self._cpu_percents,
+                cpu_history=self._cpu_history,
+                mem=self._mem,
+                mem_history=self._mem_history,
+            )
         )
         self.query_one("#kpi-static", Static).update(
             kpi_widget.render_kpi(self._kpi_data)
@@ -1662,7 +1758,14 @@ class M5Watcher(App):
         idx = modes.index(self._graph_filter)
         self._graph_filter = modes[(idx + 1) % len(modes)]
         self.query_one("#graph-static", Static).update(
-            graph_widget.render_graph(self._graph_data, filter_mode=self._graph_filter)
+            graph_widget.render_graph(
+                self._graph_data,
+                filter_mode=self._graph_filter,
+                cpu_percents=self._cpu_percents,
+                cpu_history=self._cpu_history,
+                mem=self._mem,
+                mem_history=self._mem_history,
+            )
         )
         self.notify(f"🕸  Filter → [{self._graph_filter}]", severity="information", timeout=1.5)
 

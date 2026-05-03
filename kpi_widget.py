@@ -98,6 +98,8 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
     pipe_pct    = min(pipeline / _TARGET_PIPE * 100, 100)
     conv_pct    = min((active  / tot_leads    * 100) if tot_leads > 0 else 0, 100)
     cold        = max(0.0, tot_leads - active)
+    cold_pct    = min(cold_avg / 90.0 * 100, 100)   # 90 gg = soglia lead stale
+    cold_color  = HOT_PINK if cold_avg > 60 else (ORANGE if cold_avg > 30 else LIME)
 
     # Layout: "  EMOJI label(14)  bar  value" — sub-line indented 20 cols to align
     def row(emoji: str, ec: str, label: str, pct: float, bc: str,
@@ -131,9 +133,17 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
         f"[{DIM}]weighted · goal {_eur(_TARGET_PIPE)} · {pipe_pct:.0f}%[/]",
     )
     lines.append("")
+    lines.append(f"  [{DIM}]── PI  Pipeline Indicators  ·  setter · lead commerciali ──────────[/]")
+    lines.append("")
     lines += row(
-        "👥", DEEP_PURPL, "Setter", conv_pct, DEEP_PURPL,
-        f"{int(active)} hot",
-        f"[{ORANGE}]{int(cold)}[/] [{DIM}]cold · {int(tot_leads)} leads · {conv_pct:.1f}% attivi · cold_avg {cold_avg:.0f}gg[/]",
+        "🔥", HOT_PINK, "Lead Caldi", conv_pct, HOT_PINK,
+        f"{int(active)} lead",
+        f"[{DIM}]{conv_pct:.1f}% tasso conv. · [/][{ORANGE}]{int(cold)} lead[/][{DIM}] freddi · {int(tot_leads)} lead totali[/]",
+    )
+    lines.append("")
+    lines += row(
+        "🕐", cold_color, "Cold Avg", cold_pct, cold_color,
+        f"{cold_avg:.1f} gg",
+        f"[{DIM}]media gg inattività per lead freddo · goal < 30 gg[/]",
     )
     return "\n".join(lines)

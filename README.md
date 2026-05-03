@@ -8,7 +8,7 @@
 ![Textual](https://img.shields.io/badge/Textual-8.2.5-purple?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-black?logo=apple&logoColor=white)
 ![License](https://img.shields.io/badge/license-Proprietary-red)
-![Version](https://img.shields.io/badge/version-2.3.0-teal)
+![Version](https://img.shields.io/badge/version-2.4.0-teal)
 
 <div align="center">
 
@@ -16,9 +16,26 @@
 
 </div>
 
-**Version:** 2.3.0 · **Codename:** Polpo Data Viz Edition · **Released:** 2026-05-03
+**Version:** 2.4.0 · **Codename:** Polpo Data Viz Edition · **Released:** 2026-05-03
 **Author:** Mattia Calastri · **Company:** Astra Digital Marketing
-**Pillar:** Astra OS · Polpo Cockpit Suite · **Forged in:** sess.1238 · sess.1253 · sess.1269 · sess.1279 · sess.1301 · sess.1302 · sess.1346 · sess.1350 · sess.1376
+**Pillar:** Astra OS · Polpo Cockpit Suite · **Forged in:** sess.1238 · sess.1253 · sess.1269 · sess.1279 · sess.1301 · sess.1302 · sess.1346 · sess.1350 · sess.1376 · sess.1465
+
+---
+
+## Screenshots
+
+<div align="center">
+
+### 🌡 Heatmap — CPU cores · Voice panel · Unified Memory
+![M5 Max Watcher — Heatmap tab](assets/screenshot-heatmap.png)
+
+<br/>
+
+| 🕸 Vault Knowledge Graph | 🐙 Polpo Voice panel |
+|:---:|:---:|
+| ![Vault graph — Obsidian wikilinks](assets/screenshot-vault-graph.png) | ![Polpo Voice — STT/TTS state](assets/screenshot-voice-panel.png) |
+
+</div>
 
 ---
 

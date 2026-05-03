@@ -1114,7 +1114,7 @@ class M5Watcher(App):
     Tab {{
         color: {DIM};
         background: {BG};
-        padding: 0 3;
+        padding: 1 3;
         height: 1fr;
     }}
     Tab:hover {{
@@ -1210,6 +1210,7 @@ class M5Watcher(App):
         Binding("6",   "show_tab_kpi",   "KPI",       show=False),
         Binding("f",   "cycle_graph_filter", "Filter",  show=False),
         Binding("c",   "triage",             "Triage",  show=True),
+        Binding("k",   "kill_tent_selected", "🗑 Kill",  show=False),
     ]
 
     def __init__(self):
@@ -1337,7 +1338,7 @@ class M5Watcher(App):
         pt = self.query_one("#proc-table", DataTable)
         pt.add_columns("PID", "Process", "CPU %", "RAM MB")
         tt = self.query_one("#tent-table", DataTable)
-        tt.add_columns(" ", "Process", "PID", "CPU %", "RAM MB", "Command")
+        tt.add_columns(" ", "Process", "PID", "CPU %", "RAM MB", "Command", "🗑")
 
     # ── Refresh ───────────────────────────────────────────────────────────────
     async def _refresh_fast(self) -> None:
@@ -1420,7 +1421,8 @@ class M5Watcher(App):
             tt.add_row(t['emoji'], t['name'], str(t['pid']),
                        f"[{_c(t['cpu'])}]{t['cpu']:5.1f}[/]",
                        f"[{MAG}]{t['mem_mb']:7.0f}[/]",
-                       t['cmd'])
+                       t['cmd'],
+                       f"[bold {HOT_PINK}]🗑[/]")
 
     def _update_subtitle(self, cpu: float, load: float) -> None:
         bat  = self._bat
@@ -1549,6 +1551,30 @@ class M5Watcher(App):
 
     def action_triage(self) -> None:
         self.push_screen(TriageScreen())
+
+    def action_kill_tent_selected(self) -> None:
+        import signal as _sig
+        try:
+            if self.query_one("#tab-area", TabbedContent).active != "tab-tent":
+                return
+        except Exception:
+            return
+        tt = self.query_one("#tent-table", DataTable)
+        if tt.row_count == 0 or tt.cursor_row is None:
+            return
+        try:
+            row = tt.get_row_at(tt.cursor_row)
+            pid = int(str(row[2]).strip())
+            name = str(row[1])
+        except (ValueError, IndexError):
+            return
+        try:
+            os.kill(pid, _sig.SIGTERM)
+            self.notify(f"🗑 SIGTERM → {name} (PID {pid})", severity="warning", timeout=3)
+        except ProcessLookupError:
+            self.notify(f"PID {pid} già morto", severity="warning", timeout=2)
+        except PermissionError:
+            self.notify(f"⛔ Permission denied PID {pid}", severity="error", timeout=3)
 
     def action_cycle_graph_filter(self) -> None:
         modes = graph_widget.FILTER_MODES

@@ -547,6 +547,53 @@ def _level_bar(levels: list[float], w: int = 40) -> str:
     return "".join(out)
 
 
+_LABEL_COLOR = {
+    'LOOP APERTO':  ORANGE,
+    'IN_PROGRESS':  ELEC_BLUE,
+    'WAITING':      YELLOW,
+    'PENDING':      YELLOW,
+    'PUSH PENDING': HOT_PINK,
+    'FIXED':        LIME,
+    'READY':        LIME,
+    'VERIFIED':     SOFT_GREEN,
+    'CREATED':      SOFT_GREEN,
+    'DONE':         DIM,
+}
+
+
+def render_focus(fd: dict) -> str:
+    """Render 🎯 FOCUS panel — current active task + last session tesi."""
+    sess     = fd.get('session_str', '—')
+    tesi     = fd.get('tesi', '')
+    task     = fd.get('active_task', '')
+    label    = fd.get('active_label', '')
+    updated  = fd.get('updated_ts', '')
+
+    label_col = _LABEL_COLOR.get(label.upper(), CYAN)
+    label_str = (f" [{label_col}][{label}][/]" if label else '')
+
+    task_line = (
+        f"  [{WHITE}]{task}[/]{label_str}"
+        if task else
+        f"  [{DIM}]nessun task attivo — vault non aggiornato[/]"
+    )
+    tesi_line = (
+        f"  [{DIM}]Ultima tesi:[/] [{TEAL}]{tesi}[/]"
+        if tesi else ''
+    )
+    updated_str = f"  [{DIM}]aggiornato {updated}[/]" if updated else ''
+
+    lines = [
+        f"[bold {LIME}]🎯 FOCUS[/]  [{DIM}]· sess.{sess} · cosa sta costruendo il Polpo[/]",
+        task_line,
+    ]
+    if tesi_line:
+        lines.append(tesi_line)
+    if updated_str:
+        lines.append(updated_str)
+    return "\n".join(lines)
+
+
 def render_voice(vd: dict, level_w: int = 40) -> str:
     """Render voice panel — mirrors Polpo Voice app layout in Textual markup."""
     state    = vd["state"]
@@ -1234,6 +1281,7 @@ class M5Watcher(App):
         self._sess_n      = _claude_session_number()
         self._proc_counts = {'claude': 0, 'mcp': 0}
         self._kpi_data:     dict                       = {}
+        self._focus_data:   dict                       = {}
         # Responsive layout — updated on terminal resize
         self._cols: int = 120
         self._rows: int = 40
@@ -1258,7 +1306,10 @@ class M5Watcher(App):
             with TabPane("🐙 Tentacoli", id="tab-tent"):
                 with ScrollableContainer(id="tent-box"):
                     yield Static(
-                        f"[bold {HOT_PINK}]🐙 POLPO TENTACOLI[/]  [{DIM}]· background workers[/]\n"
+                        render_focus({}),
+                        id="focus-static")
+                    yield Static(
+                        f"\n[bold {HOT_PINK}]🐙 POLPO TENTACOLI[/]  [{DIM}]· background workers[/]\n"
                         f"[italic {DIM}]The autonomic nervous system of the Polpo — Claude, MCP, daemons, watchdogs, alive.[/]",
                         id="tent-header")
                     yield DataTable(id="tent-table", cursor_type="row", zebra_stripes=True)
@@ -1380,12 +1431,13 @@ class M5Watcher(App):
     async def _refresh_slow(self) -> None:
         if self._paused:
             return
-        self._mem, self._bat, self._proc_counts, self._graph_data, self._kpi_data = await asyncio.gather(
+        self._mem, self._bat, self._proc_counts, self._graph_data, self._kpi_data, self._focus_data = await asyncio.gather(
             asyncio.to_thread(ds.unified_memory),
             asyncio.to_thread(ds.battery),
             asyncio.to_thread(_count_claude_mcp),
             asyncio.to_thread(vault_parser.vault_graph_data),
             asyncio.to_thread(kpi_widget.read_kpi_data),
+            asyncio.to_thread(ds.current_focus),
         )
         self._mem_history.append(self._mem.get('pct', 0))
 
@@ -1423,6 +1475,7 @@ class M5Watcher(App):
                        f"[{MAG}]{t['mem_mb']:7.0f}[/]",
                        t['cmd'],
                        f"[bold {HOT_PINK}]🗑[/]")
+        self.query_one("#focus-static", Static).update(render_focus(self._focus_data))
 
     def _update_subtitle(self, cpu: float, load: float) -> None:
         bat  = self._bat

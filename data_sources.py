@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import re
 import subprocess
+import time
+from pathlib import Path
 
 import psutil
 
@@ -419,3 +421,105 @@ def triage_processes() -> list[dict]:
     _order = {BUCKET_SAFE: 0, BUCKET_CAUTIOUS: 1, BUCKET_KEEP: 2}
     results.sort(key=lambda x: (_order.get(x['bucket'], 3), -x['mem_mb']))
     return results
+
+
+_FOCUS_CACHE: dict = {}
+_FOCUS_TIME: float = 0.0
+_FOCUS_TTL: float  = 10.0   # seconds
+
+_SESSION_CURRENT_PATHS = [
+    Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Astra Digital Marketing/session_current.md",
+    Path.home() / "projects/claude-memory/session_current.md",
+    Path.home() / "graphify-polpo-core/session_current.md",
+]
+
+_DONE_RE   = re.compile(r'^- .{0,40}?\bDONE\b', re.IGNORECASE)
+_STATUS_RE = re.compile(r'\b(DONE|LOOP APERTO|IN_PROGRESS|WAITING|PENDING|FIXED|READY|VERIFIED|CREATED)\b')
+
+
+def current_focus() -> dict:
+    """Parse session_current.md to extract active task + last session tesi.
+
+    Returns {session_str, tesi, active_task, active_label, updated_ts}.
+    TTL-cached at 10s — safe for asyncio.to_thread.
+    """
+    global _FOCUS_CACHE, _FOCUS_TIME
+    now = time.monotonic()
+    if _FOCUS_CACHE and (now - _FOCUS_TIME) < _FOCUS_TTL:
+        return _FOCUS_CACHE
+
+    for path in _SESSION_CURRENT_PATHS:
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(errors='ignore')
+        except OSError:
+            continue
+
+        lines = text.splitlines()
+
+        # ── session number from frontmatter ───────────────────────────────
+        session_str = '—'
+        for ln in lines[:10]:
+            m = re.search(r'session[:\s]+(\d{3,5})', ln, re.I)
+            if m:
+                session_str = m.group(1)
+                break
+
+        # ── updated timestamp ─────────────────────────────────────────────
+        updated_ts = ''
+        for ln in lines[:10]:
+            m = re.search(r'updated[:\s]+(.+)', ln, re.I)
+            if m:
+                updated_ts = m.group(1).strip().strip("'\"")
+                break
+
+        # ── ultima sessione tesi ──────────────────────────────────────────
+        tesi = ''
+        in_ultima = False
+        for ln in lines:
+            if ln.startswith('## Ultima sessione'):
+                in_ultima = True
+                continue
+            if in_ultima and ln.startswith('## '):
+                break
+            if in_ultima:
+                m = re.search(r'Tesi:\s*["“]?(.+?)["”]?\s*$', ln)
+                if m:
+                    tesi = m.group(1).strip()
+                    break
+
+        # ── first active (non-DONE) task from "Task in corso" ────────────
+        active_task  = ''
+        active_label = ''
+        in_tasks = False
+        for ln in lines:
+            if ln.startswith('## Task in corso'):
+                in_tasks = True
+                continue
+            if in_tasks and ln.startswith('## '):
+                break
+            if in_tasks and ln.startswith('- '):
+                body = ln[2:].strip()
+                # Skip tasks that are simply DONE with no pending action
+                if _DONE_RE.match(ln) and 'PENDING' not in body and 'PUSH PENDING' not in body:
+                    continue
+                m = _STATUS_RE.search(body)
+                active_label = m.group(1) if m else ''
+                # Truncate at first ' ---' separator to get clean title
+                title = body.split(' ---')[0].strip()
+                active_task = title[:72]
+                break
+
+        result = {
+            'session_str':  session_str,
+            'tesi':         tesi[:90] if tesi else '',
+            'active_task':  active_task,
+            'active_label': active_label,
+            'updated_ts':   updated_ts,
+        }
+        _FOCUS_CACHE = result
+        _FOCUS_TIME  = now
+        return result
+
+    return {'session_str': '—', 'tesi': '', 'active_task': '', 'active_label': '', 'updated_ts': ''}

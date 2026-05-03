@@ -555,3 +555,153 @@ def current_focus() -> dict:
         return result
 
     return {'session_str': '—', 'tesi': '', 'active_task': '', 'active_label': '', 'updated_ts': '', 'p0_actions': [], 'blocchi': []}
+
+
+# ── Log Feed — cross-system activity stream ────────────────────────────────────
+
+_LOG_SOURCES: list[tuple[str, str, str]] = [
+    ("/tmp/lead_alert.log",                                "👤", "GHL Leads"),
+    ("~/Library/Logs/astra/crm_alert.log",                 "📋", "CRM Alert"),
+    ("~/Library/Logs/astra/session-sync.log",              "🔄", "Session Sync"),
+    ("/tmp/setter_rollup.log",                             "📞", "Setter"),
+    ("~/Library/Logs/Polpo/health_bot.log",                "💚", "Health Bot"),
+    ("/tmp/security-push.log",                             "🔐", "Security"),
+    ("~/Library/Logs/Polpo/polpo-voice.log",               "🎤", "Voice"),
+    ("/tmp/jarvis_autosend.log",                           "🤖", "Jarvis"),
+    ("/tmp/astra_outreach_daemon.out.log",                 "📤", "Outreach"),
+    ("~/Library/Logs/astra/baileys.log",                   "💬", "WhatsApp"),
+    ("/tmp/polpo_memory_guard.log",                        "🧠", "Memory Guard"),
+    ("/tmp/sites_health_server.log",                       "🌐", "Sites Health"),
+    ("/tmp/com.polpo.claude-keepalive.log",                "🐙", "Claude"),
+    ("~/Library/Logs/astra/vault_rag_server.log",          "🗃", "Vault RAG"),
+    ("~/Library/Logs/astra/apple_notes_sync.log",          "📝", "Notes Sync"),
+    ("/tmp/astra_outreach_daemon.err.log",                 "⚠️", "Outreach Err"),
+]
+
+_TS_RE = [
+    re.compile(r'\[[\w_ ]+\s+(\d{2}:\d{2}:\d{2})\]'),     # [service HH:MM:SS]
+    re.compile(r'\[(\d{2}:\d{2}:\d{2})\]'),                # [HH:MM:SS]
+    re.compile(r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})'),  # ISO
+    re.compile(r'(\d{2}:\d{2}:\d{2})'),                    # bare HH:MM:SS
+]
+_NOISE_RE      = re.compile(r'^\[[\w_ ]*\d{2}:\d{2}:\d{2}[\w_ ]*\]\s*')
+_ISO_RE        = re.compile(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[^\s|]*[|\]]*\s*')
+_BRACKET_ISO_RE = re.compile(r'^\[\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[^\]]*\]\s*')
+_LEVEL_RE      = re.compile(r'^(?:info|warn|error|debug|critical)\s*[|:]?\s*', re.IGNORECASE)
+_SERVICE_RE    = re.compile(r'^\[[\w_-]+\]\s*')   # bare [service] prefix without timestamp
+
+_SKIP_LINES = re.compile(
+    r'npm error|npm warn|nohup:|A complete log|No such file or dir|at Object\.'
+    r'|non modificata\)|^#{1,3} |^---+$|^-{2,}$|^={2,}$|^╭|^╰|^│\s*$'
+    r'|SEZIONE GENERATA|^>\s*Aggiornato|context_detector',
+    re.IGNORECASE,
+)
+
+
+def _tail(path: Path, n: int) -> list[str]:
+    """Read last n lines without loading full file."""
+    with open(path, 'rb') as f:
+        f.seek(0, 2)
+        size = f.tell()
+        buf = min(size, n * 250)
+        f.seek(max(0, size - buf))
+        data = f.read().decode('utf-8', errors='ignore')
+    return data.splitlines()[-n:]
+
+
+def _extract_ts(line: str) -> str:
+    for pat in _TS_RE:
+        m = pat.search(line)
+        if m:
+            raw = m.group(1)
+            if 'T' in raw or (' ' in raw and '-' in raw):
+                return raw.split('T')[-1].split(' ')[-1][:8]
+            return raw[:8]
+    return ''
+
+
+def _clean_msg(line: str) -> str:
+    """Strip timestamps, level tags, brackets, leading noise from a log line."""
+    msg = _BRACKET_ISO_RE.sub('', line).strip()  # [2026-05-03T17:37:46.208901]
+    msg = _NOISE_RE.sub('', msg).strip()          # [service HH:MM:SS] prefix
+    msg = _ISO_RE.sub('', msg).strip()             # 2026-05-03T20:45:24|
+    msg = _LEVEL_RE.sub('', msg).strip()           # info| warn| error|
+    msg = _SERVICE_RE.sub('', msg).strip()         # bare [autosend] prefix
+    msg = re.sub(r'^[→\-|•✓✗⚠️\[\]\s]+', '', msg).strip()
+    return msg
+
+
+def _make_title(msg: str) -> str:
+    """Extract short human-readable title — avoid splitting on timestamps."""
+    # Avoid splitting if the first token looks like a timestamp or log metadata
+    for sep in (' — ', ' - ', ' | ', ': ', ':'):
+        parts = msg.split(sep, 1)
+        candidate = parts[0].strip()
+        if (len(candidate) >= 4 and len(candidate) <= 40
+                and not re.search(r'\d{2}:\d{2}', candidate)
+                and len(parts) > 1 and parts[1].strip()):
+            return candidate[:38]
+    return msg[:38]
+
+
+def _ts_float(ts: str, fallback: float) -> float:
+    if not ts:
+        return fallback
+    try:
+        h, m, s = ts.split(':')
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    except (ValueError, AttributeError):
+        return fallback
+
+
+def log_feed(max_per_source: int = 25) -> list[dict]:
+    """Aggregate log entries from all Polpo sources, newest-first.
+
+    Each entry: {ts, time_sort, emoji, title, source, desc}
+    """
+    entries: list[dict] = []
+    fallback_t = _time.time() % 86400  # seconds since midnight as float
+
+    for raw_path, emoji, label in _LOG_SOURCES:
+        path = Path(raw_path).expanduser()
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            lines = _tail(path, max_per_source)
+            file_ts = path.stat().st_mtime % 86400
+        except OSError:
+            continue
+
+        for i, line in enumerate(reversed(lines)):
+            line = line.rstrip()
+            if not line or len(line) < 4 or _SKIP_LINES.search(line):
+                continue
+            ts = _extract_ts(line)
+            msg = _clean_msg(line)
+            if not msg or len(msg) < 3:
+                continue
+            title = _make_title(msg)
+            desc = msg[len(title):].lstrip(':— |-').strip()[:72] if msg != title else ''
+            # Use file mtime for sort fallback, offset by line position so ordering is stable
+            sort_key = _ts_float(ts, file_ts) - i * 0.001
+            entries.append({
+                'ts':        ts or '—',
+                'time_sort': sort_key,
+                'emoji':     emoji,
+                'title':     title,
+                'source':    label,
+                'desc':      desc,
+            })
+
+    entries.sort(key=lambda e: e['time_sort'], reverse=True)
+
+    # Deduplicate: keep only the latest entry per (source, title) pair
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict] = []
+    for e in entries:
+        key = (e['source'], e['title'][:30])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(e)
+
+    return deduped[:150]

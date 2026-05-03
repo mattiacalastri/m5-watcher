@@ -67,12 +67,20 @@ def vault_graph_data(vault: Path | None = None) -> dict:
     G: nx.DiGraph            = nx.DiGraph()
     stem_index: dict[str, str] = {}
 
+    # Path.rglob returns an empty iterator on a missing directory (no OSError)
+    # so we must check existence explicitly to surface a real error to the UI.
+    if not vault.exists() or not vault.is_dir():
+        return {
+            "error": f"vault non trovato: {vault}",
+            "graph": nx.DiGraph(), "pos": {}, "stats": {"total": 0}, "intel": {},
+        }
+
     try:
         md_files = list(vault.rglob("*.md"))
     except OSError as exc:
         return {
-            "error": f"vault non trovato: {exc}",
-            "graph": nx.DiGraph(), "pos": {}, "stats": {}, "intel": {},
+            "error": f"vault non leggibile: {exc}",
+            "graph": nx.DiGraph(), "pos": {}, "stats": {"total": 0}, "intel": {},
         }
 
     # Pass 1 — register nodes + mtime (stat only, no file read)

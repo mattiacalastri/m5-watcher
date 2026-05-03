@@ -90,6 +90,8 @@ ORANGE     = "#ff8a3d"   # warm warning / heat
 DEEP_PURPL = "#9d4dff"   # P-cluster signature (performance)
 SOFT_GREEN = "#5dffaa"   # S-cluster signature (efficiency)
 
+_UNIFEED_HDR = f"[bold {ORANGE}]⚡ UNIFEED[/]  [dim]· M5 Max events[/]"
+
 
 def health_emoji(s: int) -> str:
     """Emoji semantica per health score: visuale immediata < 1ms cognitive load."""
@@ -1335,11 +1337,14 @@ class M5Watcher(App):
         self._proc_counts = {'claude': 0, 'mcp': 0}
         self._kpi_data:     dict                       = {}
         self._focus_data:   dict                       = {}
-        # Unified feed — state transition log
-        self._event_feed:   deque[str]                 = deque(maxlen=15)
-        self._prev_pressure: str                       = ''
+        # Unified feed — state transition log (cross-clock: fast=CPU/voice, slow=mem/KPI)
+        self._event_feed:      deque[str]              = deque(maxlen=15)
+        self._prev_pressure:   str                     = ''
         self._prev_swap_active: bool                   = False
-        self._cpu_spike_ticks: int                     = 0
+        self._cpu_spike_ticks:  int                    = 0
+        self._prev_voice_state: str                    = ''
+        self._prev_mrr:         float                  = 0.0
+        self._prev_pipeline:    float                  = 0.0
         # Responsive layout — updated on terminal resize
         self._cols: int = 120
         self._rows: int = 40
@@ -1476,16 +1481,13 @@ class M5Watcher(App):
                 self._core_history[i].append(v)
 
         # ── Feed: sustained CPU spike (>80% avg for 3 consecutive ticks = 6s)
+        # Append only — widget updated once at end of _refresh_fast to avoid double-render
         if overall >= 80:
             self._cpu_spike_ticks += 1
             if self._cpu_spike_ticks == 3:
                 ts = time.strftime("%H:%M:%S")
                 self._event_feed.appendleft(
                     f"[{DIM}]{ts}[/] 🔥 [{HOT_PINK}]CPU spike[/] [{DIM}]{overall:.0f}% avg[/]"
-                )
-                self.query_one("#feed-static", Static).update(
-                    f"[bold {ORANGE}]⚡ UNIFEED[/]  [{DIM}]· M5 Max events[/]" +
-                    render_feed(self._event_feed)
                 )
         else:
             self._cpu_spike_ticks = 0
@@ -1505,9 +1507,21 @@ class M5Watcher(App):
                              self._core_history, overall, mem_now, la1,
                              spark_w=self._spark_width())
         )
+        vd = voice_data()
         self.query_one("#voice-static", Static).update(
-            render_voice(voice_data(), level_w=self._voice_width())
+            render_voice(vd, level_w=self._voice_width())
         )
+        # ── Feed: Jarvis voice state transitions (offline ↔ live)
+        new_voice = vd.get('state', 'offline')
+        if self._prev_voice_state and new_voice != self._prev_voice_state:
+            ts = time.strftime("%H:%M:%S")
+            if new_voice == 'offline':
+                self._event_feed.appendleft(f"[{DIM}]{ts}[/] 🔇 [{DIM}]Jarvis offline[/]")
+            else:
+                self._event_feed.appendleft(f"[{DIM}]{ts}[/] 🎙 [{LIME}]Jarvis live[/] [{DIM}]{new_voice}[/]")
+        self._prev_voice_state = new_voice
+        # ── Feed widget: single update per fast-cycle (CPU spike appended above)
+        self.query_one("#feed-static", Static).update(_UNIFEED_HDR + render_feed(self._event_feed))
         self._update_subtitle(overall, la1)
 
     async def _refresh_slow(self) -> None:
@@ -1553,9 +1567,28 @@ class M5Watcher(App):
                 )
         self._prev_swap_active = swap_active
 
+        # ── Feed: KPI layer synapse — MRR and pipeline deltas (strategic → operational)
+        new_mrr      = self._kpi_data.get('mrr', 0)
+        new_pipeline = self._kpi_data.get('pipeline_weighted', 0)
+        if self._prev_mrr and new_mrr != self._prev_mrr:
+            delta = new_mrr - self._prev_mrr
+            sign  = "+" if delta > 0 else ""
+            col   = LIME if delta > 0 else HOT_PINK
+            self._event_feed.appendleft(
+                f"[{DIM}]{ts}[/] 💰 [{col}]MRR {sign}€{abs(int(delta)):,}[/]".replace(',', '.')
+            )
+        if self._prev_pipeline and abs(new_pipeline - self._prev_pipeline) > 500:
+            delta = new_pipeline - self._prev_pipeline
+            sign  = "+" if delta > 0 else ""
+            col   = LIME if delta > 0 else ORANGE
+            self._event_feed.appendleft(
+                f"[{DIM}]{ts}[/] 📊 [{col}]pipeline {sign}€{abs(int(delta)):,}[/]".replace(',', '.')
+            )
+        self._prev_mrr      = new_mrr
+        self._prev_pipeline = new_pipeline
+
         self.query_one("#feed-static", Static).update(
-            f"[bold {ORANGE}]⚡ UNIFEED[/]  [{DIM}]· M5 Max events[/]" +
-            render_feed(self._event_feed)
+            _UNIFEED_HDR + render_feed(self._event_feed)
         )
 
         cpu_avg = mean(self._cpu_percents) if self._cpu_percents else 0

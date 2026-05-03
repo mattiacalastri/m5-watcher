@@ -23,8 +23,9 @@ Tabs:
   🐙 Tentacoli   — Polpo background processes (Claude/MCP/daemons)
   🕸 Graph       — Vault Intelligence Panel (Neural Density · Data Attractors · Topologia)
   📊 KPI         — Business vitals (MRR · Outstanding · Pipeline · Setter)
+  📋 Logs        — Cross-system activity stream (leads · payments · calls · voice · security)
 
-Keybindings: q quit · r refresh · p pause · 1-6 tab switch · f cycle graph filter
+Keybindings: q quit · r refresh · p pause · 1-7 tab switch · f cycle graph filter
 Zoom: bottom-right + / − buttons (delegate Cmd+/− to Ghostty)
 
 ================================================================================
@@ -33,9 +34,9 @@ from __future__ import annotations
 
 # ── Metadata ──────────────────────────────────────────────────────────────────
 __title__        = "M5 Max Watcher"
-__version__      = "2.4.0"
+__version__      = "2.5.0"
 __release_date__ = "2026-05-03"
-__codename__     = "Polpo Data Viz Edition"
+__codename__     = "Activity Stream Edition"
 __author__       = "Mattia Calastri"
 __email__        = "mattia@digitalastra.it"
 __company__      = "Astra Digital Marketing"
@@ -44,7 +45,7 @@ __license__      = "Proprietary © 2026 Astra Digital Marketing — All Rights R
 __copyright__    = "© 2026 Mattia Calastri · Astra Digital Marketing"
 __status__       = "Production"
 __pillar__       = "Astra OS · Polpo Cockpit Suite"
-__forged_in__    = "sess.1465"   # UNIFEED event feed panel
+__forged_in__    = "sess.1472"   # Activity Stream tab — cross-system log cascade
 __credits__      = ("Polpo Design System", "Textual", "psutil", "Apple Silicon M5 Max")
 
 import asyncio
@@ -1280,6 +1281,20 @@ class M5Watcher(App):
         padding: 1 3;
         height: 1fr;
     }}
+    #logs-scroll {{
+        background: {BG_ALT};
+        border: heavy {ORANGE};
+        border-title-color: {ORANGE};
+        padding: 1 3;
+        height: 1fr;
+    }}
+    #logs-header {{
+        padding: 0 0 1 0;
+    }}
+    #log-table {{
+        background: {BG_ALT};
+        height: 1fr;
+    }}
     #procs-box {{
         background: {BG_ALT};
         border: heavy {ELEC_BLUE};
@@ -1298,6 +1313,9 @@ class M5Watcher(App):
         max-height: 18;
         margin-bottom: 1;
     }}
+    #tent-table {{
+        height: auto;
+    }}
     """
 
     BINDINGS = [
@@ -1310,6 +1328,7 @@ class M5Watcher(App):
         Binding("4",   "show_tab_tent",  "Tentacoli", show=False),
         Binding("5",   "show_tab_graph", "Graph",     show=False),
         Binding("6",   "show_tab_kpi",   "KPI",       show=False),
+        Binding("7",   "show_tab_logs",  "Logs",      show=False),
         Binding("f",   "cycle_graph_filter", "Filter",  show=False),
         Binding("c",   "triage",             "Triage",  show=True),
         Binding("k",   "kill_tent_selected", "🗑 Kill",  show=False),
@@ -1383,6 +1402,13 @@ class M5Watcher(App):
                         id="graph-static")
             with TabPane("📊 KPI", id="tab-kpi"):
                 yield Static(f"[{DIM}]🔄 Leggendo KPI.md dal vault…[/]", id="kpi-static")
+            with TabPane("📋 Logs", id="tab-logs"):
+                with ScrollableContainer(id="logs-scroll"):
+                    yield Static(
+                        f"[bold #ff8a3d]📋 ACTIVITY STREAM[/]  [{DIM}]· cross-system log cascade[/]\n"
+                        f"[italic {DIM}]Every signal from every tentacolo — leads, payments, calls, voice, security.[/]",
+                        id="logs-header")
+                    yield DataTable(id="log-table", cursor_type="row", zebra_stripes=True)
         with Horizontal(id="top-row"):
             with ScrollableContainer(id="cpu-panel"):
                 yield Static(
@@ -1462,6 +1488,8 @@ class M5Watcher(App):
         pt.add_columns("PID", "Process", "CPU %", "RAM MB")
         tt = self.query_one("#tent-table", DataTable)
         tt.add_columns(" ", "Process", "PID", "CPU %", "RAM MB", "Command", "🗑")
+        lt = self.query_one("#log-table", DataTable)
+        lt.add_columns("Time", " ", "Event", "Source", "Detail")
 
     # ── Refresh ───────────────────────────────────────────────────────────────
     async def _refresh_fast(self) -> None:
@@ -1613,6 +1641,31 @@ class M5Watcher(App):
         self.query_one("#kpi-static", Static).update(
             kpi_widget.render_kpi(self._kpi_data)
         )
+        await self._refresh_logs()
+
+    async def _refresh_logs(self) -> None:
+        entries = await asyncio.to_thread(ds.log_feed)
+        lt = self.query_one("#log-table", DataTable)
+        lt.clear()
+        _SRC_COLOR = {
+            "GHL Leads":  ELEC_BLUE,  "CRM Alert": TEAL,
+            "Setter":     HOT_PINK,   "WhatsApp":  SOFT_GREEN,
+            "Jarvis":     DEEP_PURPL, "Voice":     DEEP_PURPL,
+            "Security":   RED,        "Health Bot": LIME,
+            "Outreach":   ORANGE,     "Memory Guard": CYAN,
+            "Sites Health": TEAL,     "Claude":    HOT_PINK,
+            "Session Sync": DIM,      "Vault RAG": TEAL,
+            "Notes Sync": DIM,        "Outreach Err": ORANGE,
+        }
+        for e in entries:
+            src_col = _SRC_COLOR.get(e['source'], DIM)
+            lt.add_row(
+                f"[{DIM}]{e['ts']}[/]",
+                e['emoji'],
+                e['title'][:36],
+                f"[{src_col}]{e['source']}[/]",
+                f"[{DIM}]{e['desc'][:60]}[/]",
+            )
 
     async def _update_processes(self) -> None:
         procs = await asyncio.to_thread(ds.top_processes, 16)
@@ -1758,6 +1811,11 @@ class M5Watcher(App):
         self.query_one(TabbedContent).active = "tab-kpi"
         mrr = self._kpi_data.get('mrr', 0)
         self.notify(f"📊  KPI  ·  MRR €{int(mrr):,}".replace(',', '.'), timeout=1.5)
+
+    def action_show_tab_logs(self) -> None:
+        self.query_one(TabbedContent).active = "tab-logs"
+        lt = self.query_one("#log-table", DataTable)
+        self.notify(f"📋  Activity Stream  ·  {lt.row_count} events", timeout=1.5)
 
     def action_triage(self) -> None:
         self.push_screen(TriageScreen())

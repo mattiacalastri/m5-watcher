@@ -1,7 +1,7 @@
 """📊 KPI Widget — Business vitals panel for M5 Max Watcher.
 
 Reads KPI.md frontmatter from the Obsidian vault and renders a Rich-markup
-dashboard: MRR gauge, Outstanding bar, Pipeline bar, Setter funnel.
+dashboard: MRR gauge, Outstanding bar, Pipeline bar + PI section (Lead Caldi · Cold Avg).
 TTL-cached (30s). Safe for asyncio.to_thread.
 
 Pattern mirrors graph_widget.py — no imports from app.py.
@@ -138,7 +138,7 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
     lines += row(
         "🔥", HOT_PINK, "Lead Caldi", conv_pct, HOT_PINK,
         f"{int(active)} lead",
-        f"[{DIM}]{conv_pct:.1f}% tasso conv. · [/][{ORANGE}]{int(cold)} lead[/][{DIM}] freddi · {int(tot_leads)} lead totali[/]",
+        f"[{DIM}]{conv_pct:.1f}% tasso conv. · [/][{ORANGE}]{int(cold)} lead freddi[/][{DIM}] · {int(tot_leads)} lead totali[/]",
     )
     lines.append("")
     lines += row(

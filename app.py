@@ -1165,7 +1165,7 @@ class M5Watcher(App):
     #top-row {{
         height: auto;
         min-height: 16;
-        max-height: 22;
+        max-height: 44;
     }}
     #cpu-panel, #mem-panel {{
         width: 1fr;
@@ -1181,14 +1181,14 @@ class M5Watcher(App):
     #mem-panel {{
         border-title-color: {MAG};
         border-title-style: bold;
-        height: 4fr;
+        height: 1fr;
     }}
     #mem-col {{
         width: 1fr;
         layout: vertical;
     }}
     #feed-panel {{
-        height: 1fr;
+        height: 3fr;
         padding: 1 3;
         margin: 0;
         background: {BG_ALT};
@@ -1458,7 +1458,7 @@ class M5Watcher(App):
         new_min = max(14, min(20, self._rows * 40 // 100))
         top_row = self.query_one("#top-row")
         top_row.styles.min_height = new_min
-        top_row.styles.max_height = max(new_min + 4, 24)
+        top_row.styles.max_height = max(new_min + 24, 44)
         # Compact TitleBar: full=15 (ASCII banner visible), normal=8, mini=6
         title_bar = self.query_one("#title-bar", TitleBar)
         show = self._rows >= 35 and self._cols >= 52

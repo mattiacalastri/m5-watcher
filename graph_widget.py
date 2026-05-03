@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from pathlib import Path
+from statistics import mean
 from typing import Optional
 
 import networkx as nx
@@ -23,6 +25,29 @@ FILTER_MODES    = ("all", "moc", "orphan")
 MAX_FOCUS_NODES = 40
 CANVAS_W        = 90
 CANVAS_H        = 28
+
+# ── Minimal system-metric helpers (no import from app.py) ────────────────────
+_SPARK = ' ▁▂▃▄▅▆▇█'
+
+def _sparkline(data: "deque[float]", w: int = 50) -> str:
+    vals = list(data)[-w:]
+    if not vals:
+        return f'[{DIM}]{"─" * w}[/]'
+    mx = max(vals) or 1
+    return ''.join(_SPARK[min(8, int(v / mx * 8))] for v in vals)
+
+def _pct_bar(pct: float, w: int = 20) -> str:
+    filled = round(min(pct, 100) / 100 * w)
+    return '█' * filled + '░' * (w - filled)
+
+def _pct_color(pct: float) -> str:
+    if pct >= 80: return HOT_PINK
+    if pct >= 60: return ORANGE
+    if pct >= 40: return "#e6c84a"  # yellow
+    return LIME
+
+def _gb(n: int) -> str:
+    return f"{n / 1024 ** 3:.1f}G"
 
 # Neural density gauge thresholds (realistic for large knowledge graphs ~3k notes)
 _ND_LOW  = 0.0003   # very sparse
@@ -51,6 +76,10 @@ def render_graph(
     h: int = CANVAS_H,
     filter_mode: str = "all",
     focus_node: Optional[str] = None,
+    cpu_percents: Optional[list] = None,
+    cpu_history: Optional["deque[float]"] = None,
+    mem: Optional[dict] = None,
+    mem_history: Optional["deque[float]"] = None,
 ) -> str:
     """Vault Intelligence Panel — Neural Density cockpit. Full Rich markup string."""
 
@@ -277,6 +306,79 @@ def render_graph(
         *cluster_rows,
     ]
 
+    # ── CPU section ───────────────────────────────────────────────────────────
+    cpu_lines: list[str] = []
+    if cpu_percents and cpu_history is not None:
+        e_cores = 6
+        p_cores = 12
+        e_vals  = cpu_percents[:e_cores]
+        p_vals  = cpu_percents[e_cores:e_cores + p_cores]
+        overall = mean(cpu_percents)
+        e_avg   = mean(e_vals) if e_vals else 0.0
+        p_avg   = mean(p_vals) if p_vals else 0.0
+        ov_col  = _pct_color(overall)
+        e_col   = _pct_color(e_avg)
+        p_col   = _pct_color(p_avg)
+        spark_w = max(20, w - 14)
+        cpu_lines = [
+            "",
+            f"  [{ELEC_BLUE}]⚡ CPU[/]  [{DIM}]· M5 Max 18C[/]",
+            div,
+            "",
+            f"  [{DIM}]Overall  [/][{ov_col}]{_pct_bar(overall, 22)}[/]  [bold {ov_col}]{overall:4.1f}%[/]",
+            f"  [{DIM}]S-cores  [/][{e_col}]{_pct_bar(e_avg, 22)}[/]  [{e_col}]{e_avg:4.1f}%[/]  [{DIM}]6E[/]",
+            f"  [{DIM}]P-cores  [/][{p_col}]{_pct_bar(p_avg, 22)}[/]  [{p_col}]{p_avg:4.1f}%[/]  [{DIM}]12P[/]",
+            "",
+            f"  [{ov_col}]{_sparkline(cpu_history, spark_w)}[/]  ⚡ [{DIM}]2-min[/]",
+            "",
+        ]
+
+    # ── Unified memory section ────────────────────────────────────────────────
+    mem_lines: list[str] = []
+    if mem and mem_history is not None:
+        pct        = mem.get('pct', 0)
+        total      = mem.get('total', 1)
+        free       = mem.get('free', 0)
+        swap       = mem.get('swap', 0)
+        wired      = mem.get('wired', 0)
+        active     = mem.get('active', 0)
+        inactive   = mem.get('inactive', 0)
+        compressed = mem.get('compressed', 0)
+        prs_label, prs_key = mem.get('pressure', ('—', 'ok'))
+        prs_col  = {
+            'ok': LIME, 'info': ELEC_BLUE,
+            'warning': ORANGE, 'error': HOT_PINK,
+        }.get(prs_key, DIM)
+        prs_emoji = {'ok': '🟢', 'info': '🔵', 'warning': '🟡', 'error': '🔴'}.get(prs_key, '⚪')
+        swap_col = HOT_PINK if swap > 0.5e9 else (ORANGE if swap > 0 else DIM)
+        mem_col  = _pct_color(pct)
+        spark_w  = max(20, w - 14)
+
+        def _seg(label: str, val: int, color: str) -> str:
+            b = _pct_bar(val / total * 100, 14)
+            return f"   [{color}]{label:<10}[/] [{color}]{b}[/] [bold {color}]{_gb(val):>7}[/]"
+
+        mem_lines = [
+            "",
+            f"  [{LIME}]🧠 UNIFIED MEMORY[/]  [{DIM}]· {_gb(total)}[/]",
+            div,
+            "",
+            (
+                f"  [{mem_col}]{_pct_bar(pct, 22)}[/]  [bold {mem_col}]{pct:4.1f}%[/]"
+                f"  {prs_emoji} [bold {prs_col}]{prs_label}[/]"
+                f"  [{DIM}]swap[/] [bold {swap_col}]{_gb(swap)}[/]"
+            ),
+            "",
+            _seg("Wired",      wired,      HOT_PINK),
+            _seg("Active",     active,     _pct_color(active / total * 100)),
+            _seg("Inactive",   inactive,   DIM),
+            _seg("Compressed", compressed, ORANGE),
+            _seg("Free",       free,       LIME),
+            "",
+            f"  [{mem_col}]{_sparkline(mem_history, spark_w)}[/]  🧠 [{DIM}]2-min[/]",
+            "",
+        ]
+
     # ── Filter hint ───────────────────────────────────────────────────────────
     filter_tabs = "  ".join(
         f"[bold {TEAL}][{m}][/]" if m == filter_mode else f"[{DIM}][{m}][/]"
@@ -292,6 +394,8 @@ def render_graph(
         *status_lines,
         *recent_lines,
         *conn_lines,
+        *cpu_lines,
+        *mem_lines,
         "",
         footer,
     ])

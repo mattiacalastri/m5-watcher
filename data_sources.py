@@ -7,9 +7,19 @@ import subprocess
 
 import psutil
 
-PAGE_SIZE = 16384  # M5 Max page size (bytes)
-E_CORES = 6        # "Super" efficiency cores  (hw.perflevel0)
-P_CORES = 12       # Performance cores          (hw.perflevel1)
+PAGE_SIZE = 16384  # Apple Silicon page size (bytes)
+
+
+def _sysctl_int(key: str, default: int) -> int:
+    try:
+        return int(subprocess.check_output(['sysctl', '-n', key]).decode().strip())
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+        return default
+
+
+# Auto-detect Apple Silicon clusters — M5 Max (6+12), M4 Max (4+10), M1 Pro (2+8/2+6), etc.
+E_CORES = _sysctl_int('hw.perflevel1.physicalcpu', 6)
+P_CORES = _sysctl_int('hw.perflevel0.physicalcpu', 12)
 
 POLPO_PROCS = {
     'ollama': '🧠', 'claude': '🐙', 'python3': '🐍', 'python': '🐍',

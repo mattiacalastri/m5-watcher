@@ -337,7 +337,7 @@ def render_graph(
     mem_lines: list[str] = []
     if mem and mem_history is not None:
         pct        = mem.get('pct', 0)
-        total      = mem.get('total', 1)
+        total      = max(mem.get('total', 1), 1)
         free       = mem.get('free', 0)
         swap       = mem.get('swap', 0)
         wired      = mem.get('wired', 0)

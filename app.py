@@ -33,8 +33,8 @@ from __future__ import annotations
 
 # ── Metadata ──────────────────────────────────────────────────────────────────
 __title__        = "M5 Max Watcher"
-__version__      = "2.3.0"
-__release_date__ = "2026-05-02"
+__version__      = "2.4.0"
+__release_date__ = "2026-05-03"
 __codename__     = "Polpo Data Viz Edition"
 __author__       = "Mattia Calastri"
 __email__        = "mattia@digitalastra.it"
@@ -44,7 +44,7 @@ __license__      = "Proprietary © 2026 Astra Digital Marketing — All Rights R
 __copyright__    = "© 2026 Mattia Calastri · Astra Digital Marketing"
 __status__       = "Production"
 __pillar__       = "Astra OS · Polpo Cockpit Suite"
-__forged_in__    = "sess.1238"   # session of consolidation v2.0
+__forged_in__    = "sess.1465"   # UNIFEED event feed panel
 __credits__      = ("Polpo Design System", "Textual", "psutil", "Apple Silicon M5 Max")
 
 import asyncio
@@ -1540,7 +1540,7 @@ class M5Watcher(App):
         self._prev_pressure = new_pressure
 
         # ── Feed: detect swap activation / deactivation
-        swap_active = self._mem.get('swap', 0) > 0
+        swap_active = self._mem.get('swap', 0) > 0.5e9
         if swap_active != self._prev_swap_active:
             if swap_active:
                 swap_gb = self._mem.get('swap', 0) / 1024**3

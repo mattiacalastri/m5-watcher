@@ -5,6 +5,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 
 ---
 
+## [2.4.0] — 2026-05-03 · UNIFEED Event Panel (sess.1465)
+
+**Released sess.1465** — live event feed under Unified Memory panel.
+Zero new dependencies — pure state comparison on already-collected data.
+
+### Added
+- **`render_feed()`** — timestamped event renderer, newest-first, Textual markup
+- **`#feed-panel` (UNIFEED)** below `#mem-panel` inside `Vertical #mem-col` (3fr/1fr split)
+- **Memory pressure transitions** — NORMAL/MODERATE/HIGH/CRITICAL with color coding
+- **Swap activation/deactivation** — threshold >500MB (aligns with `render_mem` logic)
+- **CPU spike detection** — >80% avg sustained for 3 consecutive ticks (6s) → HOT_PINK alert
+- **`_event_feed` deque** — maxlen=15, `appendleft` so newest is always first
+- State attrs: `_prev_pressure`, `_prev_swap_active`, `_cpu_spike_ticks`
+
+### Fixed
+- Swap threshold was `> 0` (always true on M5 Max); corrected to `> 0.5e9`
+
+---
+
 ## [2.3.0] — 2026-05-03 · Process Triage Advisor (sess.1376)
 
 **Released sess.1376** — process knowledge base with 40+ Polpo-aware patterns.

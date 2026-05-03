@@ -13,13 +13,24 @@ PAGE_SIZE = 16384  # Apple Silicon page size (bytes)
 def _sysctl_int(key: str, default: int) -> int:
     try:
         return int(subprocess.check_output(['sysctl', '-n', key]).decode().strip())
-    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+    except (subprocess.CalledProcessError, OSError, ValueError):
         return default
 
 
-# Auto-detect Apple Silicon clusters — M5 Max (6+12), M4 Max (4+10), M1 Pro (2+8/2+6), etc.
-E_CORES = _sysctl_int('hw.perflevel1.physicalcpu', 6)
-P_CORES = _sysctl_int('hw.perflevel0.physicalcpu', 12)
+def _detect_clusters() -> tuple[int, int]:
+    """Auto-detect Apple Silicon (E_CORES, P_CORES). Falls back to psutil split on non-Apple."""
+    p = _sysctl_int('hw.perflevel0.physicalcpu', 0)  # performance cluster (larger L2)
+    e = _sysctl_int('hw.perflevel1.physicalcpu', 0)  # efficiency cluster
+    if p > 0 and e > 0:
+        return e, p
+    # Fallback: non-Apple-Silicon (Intel Mac, Linux CI). Split physical cores 50/50.
+    total = psutil.cpu_count(logical=False) or psutil.cpu_count(logical=True) or 8
+    half = max(1, total // 2)
+    return half, total - half
+
+
+# Apple Silicon clusters — M5 Max (6+12=18), M4 Max (4+10=14), M1 Pro (2+6/2+8), etc.
+E_CORES, P_CORES = _detect_clusters()
 
 POLPO_PROCS = {
     'ollama': '🧠', 'claude': '🐙', 'python3': '🐍', 'python': '🐍',

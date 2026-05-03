@@ -1164,8 +1164,8 @@ class M5Watcher(App):
     }}
     #top-row {{
         height: auto;
-        min-height: 14;
-        max-height: 18;
+        min-height: 16;
+        max-height: 22;
     }}
     #cpu-panel, #mem-panel {{
         width: 1fr;
@@ -1181,7 +1181,7 @@ class M5Watcher(App):
     #mem-panel {{
         border-title-color: {MAG};
         border-title-style: bold;
-        height: 3fr;
+        height: 4fr;
     }}
     #mem-col {{
         width: 1fr;

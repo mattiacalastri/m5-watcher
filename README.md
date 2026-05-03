@@ -8,7 +8,7 @@
 ![Textual](https://img.shields.io/badge/Textual-8.2.5-purple?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-black?logo=apple&logoColor=white)
 ![License](https://img.shields.io/badge/license-Proprietary-red)
-![Version](https://img.shields.io/badge/version-2.4.0-teal)
+![Version](https://img.shields.io/badge/version-2.5.0-teal)
 
 <div align="center">
 
@@ -16,7 +16,7 @@
 
 </div>
 
-**Version:** 2.4.0 · **Codename:** Polpo Data Viz Edition · **Released:** 2026-05-03
+**Version:** 2.5.0 · **Codename:** Activity Stream Edition · **Released:** 2026-05-03
 **Author:** Mattia Calastri · **Company:** Astra Digital Marketing
 **Pillar:** Astra OS · Polpo Cockpit Suite · **Forged in:** sess.1238 · sess.1253 · sess.1269 · sess.1279 · sess.1301 · sess.1302 · sess.1346 · sess.1350 · sess.1376 · sess.1465
 
@@ -76,6 +76,7 @@ data from your Apple Silicon M5 Max:
 | 🐙 Tentacoli | Polpo background processes map |
 | 🕸 Graph | Vault Intelligence Panel — Neural Density cockpit, Data Attractors, Topologia |
 | 📊 KPI | Business vitals — MRR, outstanding, pipeline weighted, setter metrics |
+| 📋 Logs | Activity Stream — cross-system log cascade (leads, payments, voice, security) |
 
 **Polpo Voice panel** (Heatmap tab, right column): mirrors JarvisToggle.app — OUT/IN/LOOP/DIALOG state pills,
 waveform sparkline from `stt_levels.bin`, active voice name, last 10 transcriptions.
@@ -87,7 +88,7 @@ waveform sparkline from `stt_levels.bin`, active voice name, last 10 transcripti
 | `q` | Quit |
 | `r` | Force refresh |
 | `p` | Toggle pause |
-| `1` `2` `3` `4` `5` `6` | Switch tab (Heatmap / Analytics / Processes / Tentacoli / Graph / KPI) |
+| `1` `2` `3` `4` `5` `6` `7` | Switch tab (Heatmap / Analytics / Processes / Tentacoli / Graph / KPI / Logs) |
 | `c` | Open Process Triage Advisor modal |
 | `f` | Cycle graph filter (all / moc / orphan) |
 | Click `+` `−` (bottom-right) | Zoom Ghostty terminal (delegates `Cmd+`/`Cmd-`) |

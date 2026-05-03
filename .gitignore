@@ -36,3 +36,4 @@ secrets.json
 
 # Generated vault data — user-specific, regenerate with vault_parser.py
 semantic_areas.json
+graphify-out/

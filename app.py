@@ -1147,8 +1147,8 @@ class M5Watcher(App):
     }}
     #top-row {{
         height: auto;
-        min-height: 22;
-        max-height: 34;
+        min-height: 16;
+        max-height: 24;
     }}
     #cpu-panel, #mem-panel {{
         width: 1fr;
@@ -1384,10 +1384,10 @@ class M5Watcher(App):
         self._cols = event.size.width
         self._rows = event.size.height
         # Shrink top-row on small terminals so tab area keeps breathing room
-        new_min = max(20, min(26, self._rows * 55 // 100))
+        new_min = max(14, min(20, self._rows * 40 // 100))
         top_row = self.query_one("#top-row")
         top_row.styles.min_height = new_min
-        top_row.styles.max_height = max(new_min + 6, 34)
+        top_row.styles.max_height = max(new_min + 4, 24)
         # Compact TitleBar: full=15 (ASCII banner visible), normal=8, mini=6
         title_bar = self.query_one("#title-bar", TitleBar)
         show = self._rows >= 35 and self._cols >= 52

@@ -1665,9 +1665,11 @@ class M5Watcher(App):
         }
         for e in entries:
             src_col = _SRC_COLOR.get(e['source'], DIM)
+            # NEW badge: teal dot for entries from a source active in the last 5 min
+            new_badge = f"[bold {TEAL}]●[/]" if e.get('is_new') else f"[{DIM}]·[/]"
             lt.add_row(
                 f"[{DIM}]{e['ts']}[/]",
-                e['emoji'],
+                f"{new_badge} {e['emoji']}",
                 e['title'][:36],
                 f"[{src_col}]{e['source']}[/]",
                 f"[{DIM}]{e['desc'][:60]}[/]",

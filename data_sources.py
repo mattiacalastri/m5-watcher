@@ -598,9 +598,34 @@ _SERVICE_RE    = re.compile(r'^\[[\w_-]+\]\s*')   # bare [service] prefix withou
 _SKIP_LINES = re.compile(
     r'npm error|npm warn|nohup:|A complete log|No such file or dir|at Object\.'
     r'|non modificata\)|^#{1,3} |^---+$|^-{2,}$|^={2,}$|^╭|^╰|^│\s*$'
-    r'|SEZIONE GENERATA|^>\s*Aggiornato|context_detector',
+    r'|SEZIONE GENERATA|^>\s*Aggiornato|context_detector'
+    r'|^[╠╔╗╚╝╞╡╟╢╣╤╥╦╧╨╩╪╫╬├┼┤┬┴─│]+$'   # box-drawing only lines
+    r'|^\s*[┤├]\s*$',
     re.IGNORECASE,
 )
+
+# CRM Alert: lines without inline timestamp — detect tabular rows (stage breakdown)
+# Pattern: "  StageName       N     %" or "  1° Tentativo   15   4%"
+_CRM_TABULAR_RE = re.compile(
+    r'^\s{1,4}(.{3,30}?)\s{2,}(\d+)\s{2,}(\d+%?)\s*$'
+)
+# CRM Alert: table header/separator lines to skip
+_CRM_TABLE_SKIP = re.compile(
+    r'^\s*Stage\s+N\s+%\s*$'
+    r'|^[\s─\-═]+$'
+    r'|Stage breakdown'
+    r'|Setter.*Pipeline.*Audit'
+    r'|^[╭╰│╞╡╟╠╣╤╥╦╧╨╩╪╫╬├┼┤┬┴]+',
+    re.IGNORECASE,
+)
+
+# Sources considered "dead/empty" at startup — used only for audit; does not affect feed
+_EMPTY_SOURCES: frozenset[str] = frozenset({
+    "Voice",        # polpo-voice.log is 0B (daemon not running)
+    "Sites Health", # 0B
+    "Claude",       # 0B
+    "Outreach Err", # 0B
+})
 
 
 def _tail(path: Path, n: int) -> list[str]:
@@ -636,8 +661,15 @@ def _clean_msg(line: str) -> str:
     return msg
 
 
-def _make_title(msg: str) -> str:
+def _make_title(msg: str, source: str = '') -> str:
     """Extract short human-readable title — avoid splitting on timestamps."""
+    # CRM Alert tabular rows: "  2° Tentativo   15   4%" → "2° Tentativo ×15"
+    if source == 'CRM Alert':
+        m = _CRM_TABULAR_RE.match(msg)
+        if m:
+            stage = m.group(1).strip().rstrip('.')
+            count = m.group(2)
+            return f"{stage} ×{count}"[:38]
     # Avoid splitting if the first token looks like a timestamp or log metadata
     for sep in (' — ', ' - ', ' | ', ': ', ':'):
         parts = msg.split(sep, 1)
@@ -687,22 +719,32 @@ def log_feed(max_per_source: int = 25) -> list[dict]:
         except OSError:
             continue
 
+        wall_now = _time.time()
         for i, line in enumerate(reversed(lines)):
             line = line.rstrip()
             if not line or len(line) < 4 or _SKIP_LINES.search(line):
+                continue
+            # CRM Alert: skip table header/separator lines
+            if label == 'CRM Alert' and _CRM_TABLE_SKIP.search(line):
                 continue
             ts = _extract_ts(line)
             msg = _clean_msg(line)
             if not msg or len(msg) < 3:
                 continue
-            title = _make_title(msg)
+            title = _make_title(msg, source=label)
             desc = msg[len(title):].lstrip(':— |-').strip()[:72] if msg != title else ''
             # Use file mtime for sort fallback, offset by line position so ordering is stable
             sort_key = _ts_float(ts, file_ts) - i * 0.001
+            if not ts:
+                ts = _time.strftime('%H:%M:%S', _time.localtime(file_ts))
+            # NEW badge: entry is considered "recent" if file was modified within 5 min
+            # and this is one of the latest lines (first few reversed, i.e. i < 3)
+            is_new = (wall_now - file_ts) < 300 and i < 3
             entries.append({
-                'ts':        ts or '—',
+                'ts':        ts,
                 'time_sort': sort_key,
                 'emoji':     emoji,
+                'is_new':    is_new,
                 'title':     title,
                 'source':    label,
                 'desc':      desc,

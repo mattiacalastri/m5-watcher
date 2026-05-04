@@ -61,7 +61,10 @@ def sparkline(values: Iterable[float], width: int = 50, color: str | None = None
     """
     vals = list(values)[-width:]
     if not vals:
-        return f'[{DIM}]{"─" * width}[/]' if color is None else f'[{DIM}]{"─" * width}[/]'
+        # sess.1508 round 2: empty state coerente — markup solo se color
+        # esplicito, altrimenti plain (nullity contract docstring).
+        empty = "─" * width
+        return f'[{DIM}]{empty}[/]' if color else empty
     vmin = min(vals)
     vmax = max(vals)
     rng  = vmax - vmin
@@ -124,8 +127,16 @@ def gauge(
     higher_is_better=False → rosso sopra, verde sotto (CPU%, error rate).
 
     Returns (bar_markup, color).
+
+    sess.1508 round 2: short-circuit se hi-lo ≈ 0 (vault 0 note → density=0,
+    range=0) → DIM bar invece di ORANGE warning fuorviante. Anche guard
+    su val non finito (NaN/inf da dati corrotti).
     """
-    norm = max(0.0, min(1.0, (val - lo) / max(hi - lo, 1e-9)))
+    import math as _m
+    if not _m.isfinite(val) or hi - lo < 1e-9:
+        bar = f'[{DIM}]{"░" * width}[/]'
+        return bar, DIM
+    norm = max(0.0, min(1.0, (val - lo) / (hi - lo)))
     if higher_is_better:
         color = LIME if norm >= 0.65 else (TEAL if norm >= 0.35 else ORANGE)
     else:

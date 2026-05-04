@@ -51,6 +51,7 @@ __credits__      = ("Polpo Design System", "Textual", "psutil", "Apple Silicon M
 
 import asyncio
 import functools
+import itertools
 import json
 import math
 import os
@@ -342,11 +343,25 @@ def render_mem(m: dict, history: deque[float], cpu_avg: float, load: float) -> s
     ])
 
 
+def _trim_deque(d: deque, n: int) -> list[float]:
+    """Take last `n` items da deque senza materializzare l'intera lista.
+
+    sess.1508 round 2 perf fix: heatmap chiamava `list(deque)[-cols:]` 18
+    volte ogni 2s = 36 list allocation — ora `islice` lavora a O(min(len,n))
+    e materializza solo i last-n.
+    """
+    if not d:
+        return []
+    skip = max(0, len(d) - n)
+    return list(itertools.islice(d, skip, len(d)))
+
+
 def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str:
     """Temporal heatmap — M5 fingerprint with time axis.
 
     sess.1508 audit fix: rimosso codice morto duplicato (axis costruito due
     volte) e legenda allineata con i nuovi 8 glyph distinti.
+    Round 2: deque slice via itertools.islice (no GC pressure).
     """
     tick_every = 10   # mark every 10 cols = 20 s
     total_secs = cols * 2
@@ -373,7 +388,7 @@ def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str
     ]
 
     for i in range(ds.E_CORES):
-        vals = list(core_history.get(i, deque()))[-cols:]
+        vals = _trim_deque(core_history.get(i, deque()), cols)
         cells = ''.join(f'[{heat(v)[1]}]{heat(v)[0]}[/]' for v in vals)
         # Pad left if not enough data
         pad = cols - len(vals)
@@ -385,7 +400,7 @@ def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str
 
     for i in range(ds.P_CORES):
         idx  = ds.E_CORES + i
-        vals = list(core_history.get(idx, deque()))[-cols:]
+        vals = _trim_deque(core_history.get(idx, deque()), cols)
         cells = ''.join(f'[{heat(v)[1]}]{heat(v)[0]}[/]' for v in vals)
         pad = cols - len(vals)
         pad_str = f'[{DIM}]{" " * pad}[/]' if pad > 0 else ''
@@ -1039,34 +1054,36 @@ class TitleBar(Static):
     phase:      reactive[float] = reactive(0.0)
     status:     reactive[str]   = reactive("")
     rich_info:  reactive[dict]  = reactive(dict)
-    show_ascii: reactive[bool]  = reactive(True)
+    # sess.1508 round 2 hierarchy fix: ASCII banner OFF di default — recupera
+    # 7 righe di viewport per info reali (sess/MRR/CPU). Si attiva via
+    # on_resize quando il terminale è abbastanza grande (cols>=52, rows>=35)
+    # E l'utente non l'ha esplicitamente nascosto.
+    show_ascii: reactive[bool]  = reactive(False)
 
     def on_mount(self) -> None:
-        self._last_static_lines: tuple[str, str, str, str] | None = None
+        # sess.1508 round 2 — diff cache reale: tupla (ascii_banner, line1..4)
+        # Confronto in _repaint, skip self.update() se identica.
+        self._last_paint: tuple | None = None
         self.set_interval(RAINBOW_FPS_DT, self._tick)
         self._repaint()
 
     def _tick(self) -> None:
         # sess.1494: quantizza phase → reactive watch dedup + lru_cache hit
-        self.phase = round((self.phase + RAINBOW_SPEED) % 1.0, RAINBOW_PHASE_Q)
+        new_phase = round((self.phase + RAINBOW_SPEED) % 1.0, RAINBOW_PHASE_Q)
+        if new_phase != self.phase:
+            self.phase = new_phase
 
     def watch_phase(self, _new: float) -> None:
-        # sess.1508 audit fix: phase tick (4fps) ridipinge SOLO il rainbow,
-        # le line2/3/4 (status/rich) sono gestite da watch_status/rich_info
-        # (≤0.5fps). Prima ogni tick rainbow forzava update completo →
-        # banding/desync visibile su ASCII vs status line.
         self._repaint()
 
     def watch_status(self, _new: str) -> None:
-        self._last_static_lines = None   # invalidate cache → next repaint pulls fresh
         self._repaint()
 
     def watch_rich_info(self, _new: dict) -> None:
-        self._last_static_lines = None
         self._repaint()
 
     def watch_show_ascii(self, _new: bool) -> None:
-        self._last_static_lines = None
+        self._last_paint = None   # forza repaint quando ASCII viene mostrato/nascosto
         self._repaint()
 
     def _repaint(self) -> None:
@@ -1122,6 +1139,12 @@ class TitleBar(Static):
             )
 
         line4 = self.status if self.status else f"[{DIM}]🔄 Probing system…[/]"
+        # sess.1508 round 2: diff cache — skip self.update() se identico.
+        # A 4fps phase ricalcola, ma se quantizzata = uguale → no paint.
+        paint = (ascii_banner, line1, line2, line3, line4)
+        if paint == self._last_paint:
+            return
+        self._last_paint = paint
         self.update(f"{ascii_banner}{line1}\n{line2}\n{line3}\n{line4}")
 
 
@@ -1553,6 +1576,11 @@ class M5Watcher(App):
         # Static.update() inutili quando il contenuto non cambia (era il caso
         # del feed-static aggiornato ogni 2s anche con deque immutata).
         self._feed_last_render: str = ""
+        # sess.1508 round 2: diff cache esteso a tutti i widget heavy-render.
+        # Risparmio atteso: ~70% Static.update() su CPU/RAM stabile.
+        self._render_cache: dict[str, str] = {}
+        # Resize debounce timer (sess.1508 round 2)
+        self._resize_timer = None
 
     # ── Layout ────────────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -1667,7 +1695,14 @@ class M5Watcher(App):
         tabs.styles.padding = (0, 0, 0, pad)
 
     def on_resize(self, event: events.Resize) -> None:
-        """Capture terminal size and adapt layout + panels immediately."""
+        """Capture terminal size and adapt layout + panels immediately.
+
+        sess.1508 round 2: width-sensitive panels (heatmap) ridraw deferito
+        via debounce 150ms — Textual emette burst di event durante drag e il
+        rebuild sincrono creava race con _refresh_fast (entrambi su #heat-static).
+        Layout-level adjustments (height TitleBar, top-row min_height,
+        center_tabs) restano immediati perché low-cost.
+        """
         self._cols = event.size.width
         self._rows = event.size.height
         # Shrink top-row on small terminals so tab area keeps breathing room
@@ -1680,11 +1715,25 @@ class M5Watcher(App):
         show = self._rows >= 35 and self._cols >= 52
         title_bar.show_ascii = show
         title_bar.styles.height = 6 if self._rows < 35 else (15 if show else 8)
-        # Immediately re-render width-sensitive panels
-        _heat_text = RichText.from_markup(render_heatmap(self._core_history, cols=self._heatmap_cols()))
-        _heat_text.no_wrap = True
-        self.query_one("#heat-static", Static).update(_heat_text)
         self._center_tabs()
+        # Debounce heatmap rebuild
+        if self._resize_timer is not None:
+            try:
+                self._resize_timer.stop()
+            except Exception:
+                pass
+        self._resize_timer = self.set_timer(0.15, self._on_resize_settled)
+
+    def _on_resize_settled(self) -> None:
+        """Heatmap rebuild dopo che il resize si è stabilizzato (sess.1508 round 2)."""
+        heat_markup = render_heatmap(self._core_history, cols=self._heatmap_cols())
+        self._render_cache["heat-static"] = heat_markup
+        try:
+            _heat_text = RichText.from_markup(heat_markup)
+            _heat_text.no_wrap = True
+            self.query_one("#heat-static", Static).update(_heat_text)
+        except Exception:
+            pass
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent"}
@@ -1698,7 +1747,17 @@ class M5Watcher(App):
         # Seed disk/net deltas
         await asyncio.to_thread(ds.disk_io_rate)
         await asyncio.to_thread(ds.net_io_rate)
+        # sess.1508 round 2 hierarchy fix: KPI è il dato decision-driving
+        # (MRR, Outstanding, Pipeline) → default tab al posto di Heatmap
+        # decorativa. Top-of-fold finanziario.
+        try:
+            self.query_one(TabbedContent).active = "tab-kpi"
+        except Exception:
+            pass
+        # Sfasamento set_interval per evitare allineamento ogni 10s che
+        # bursta tutti i widget update insieme (audit perf round 2).
         self.set_interval(2.0, self._refresh_fast)
+        await asyncio.sleep(0.3)
         self.set_interval(5.0, self._refresh_slow)
         # Immediate initial load — all panels (incl. Graph + KPI) visible on startup
         await self._refresh_fast()
@@ -1711,6 +1770,21 @@ class M5Watcher(App):
         tt.add_columns(" ", "Process", "PID", "CPU %", "RAM MB", "Command", "🗑")
         lt = self.query_one("#log-table", DataTable)
         lt.add_columns("Time", " ", "Event", "Source", "Detail")
+
+    # ── Render cache helper (sess.1508 round 2) ──────────────────────────────
+    def _update_if_changed(self, widget_id: str, content: str) -> None:
+        """Static.update solo se il contenuto è diverso dal cache.
+
+        Risolve audit perf round 2: render_*() chiamato N volte/s anche su
+        dati invariati → forced repaint. Skip update se hash uguale.
+        """
+        if self._render_cache.get(widget_id) == content:
+            return
+        self._render_cache[widget_id] = content
+        try:
+            self.query_one(f"#{widget_id}", Static).update(content)
+        except Exception:
+            pass
 
     # ── Refresh ───────────────────────────────────────────────────────────────
     async def _refresh_fast(self) -> None:
@@ -1744,21 +1818,29 @@ class M5Watcher(App):
         mem_now = self._mem.get('pct', 0)
         la1, _, _ = ds.load_avg()
 
-        self.query_one("#cpu-content",   Static).update(
+        # sess.1508 round 2: tutti i Static.update via _update_if_changed →
+        # skip paint inutili quando il contenuto è identico (CPU stabile).
+        self._update_if_changed(
+            "cpu-content",
             f"[bold {ELEC_BLUE}]⚡ CPU[/]  [{DIM}]· M5 Max 18C[/]\n" +
-            render_cpu(self._cpu_percents, self._cpu_history, self._disk, self._net)
+            render_cpu(self._cpu_percents, self._cpu_history, self._disk, self._net),
         )
-        _heat_text = RichText.from_markup(render_heatmap(self._core_history, cols=self._heatmap_cols()))
-        _heat_text.no_wrap = True
-        self.query_one("#heat-static", Static).update(_heat_text)
-        self.query_one("#analytics-static", Static).update(
+        heat_markup = render_heatmap(self._core_history, cols=self._heatmap_cols())
+        if self._render_cache.get("heat-static") != heat_markup:
+            self._render_cache["heat-static"] = heat_markup
+            _heat_text = RichText.from_markup(heat_markup)
+            _heat_text.no_wrap = True
+            self.query_one("#heat-static", Static).update(_heat_text)
+        self._update_if_changed(
+            "analytics-static",
             render_analytics(self._cpu_history, self._mem_history,
                              self._core_history, overall, mem_now, la1,
-                             spark_w=self._spark_width())
+                             spark_w=self._spark_width()),
         )
         vd = await asyncio.to_thread(voice_data)
-        self.query_one("#voice-static", Static).update(
-            render_voice(vd, level_w=self._voice_width())
+        self._update_if_changed(
+            "voice-static",
+            render_voice(vd, level_w=self._voice_width()),
         )
         # ── Feed: Jarvis voice state transitions (offline ↔ live)
         new_voice = vd.get('state', 'offline')
@@ -1770,10 +1852,7 @@ class M5Watcher(App):
                 self._event_feed.appendleft(f"[{DIM}]{ts}[/] 🎙 [{LIME}]Jarvis live[/] [{DIM}]{new_voice}[/]")
         self._prev_voice_state = new_voice
         # ── Feed widget: skip update se invariato (sess.1508 audit fix).
-        feed_str = _UNIFEED_HDR + render_feed(self._event_feed)
-        if feed_str != self._feed_last_render:
-            self.query_one("#feed-static", Static).update(feed_str)
-            self._feed_last_render = feed_str
+        self._update_if_changed("feed-static", _UNIFEED_HDR + render_feed(self._event_feed))
         self._update_subtitle(overall, la1)
 
     async def _refresh_slow(self) -> None:
@@ -1843,21 +1922,22 @@ class M5Watcher(App):
         self._prev_mrr      = new_mrr
         self._prev_pipeline = new_pipeline
 
-        feed_str = _UNIFEED_HDR + render_feed(self._event_feed)
-        if feed_str != self._feed_last_render:
-            self.query_one("#feed-static", Static).update(feed_str)
-            self._feed_last_render = feed_str
+        # sess.1508 round 2: tutti via _update_if_changed → skip render
+        # quando data è invariato (TTL cache 30-60s a monte).
+        self._update_if_changed("feed-static", _UNIFEED_HDR + render_feed(self._event_feed))
 
         cpu_avg = mean(self._cpu_percents) if self._cpu_percents else 0
         la1, _, _ = ds.load_avg()
         _mem_total_gb = self._mem.get('total', 0) / 1024 ** 3
         _mem_gb_str = f"{_mem_total_gb:.0f}GB" if _mem_total_gb > 0 else "—GB"
-        self.query_one("#mem-content", Static).update(
+        self._update_if_changed(
+            "mem-content",
             f"[bold {LIME}]🧠 UNIFIED MEMORY[/]  [{DIM}]· {_mem_gb_str}[/]\n" +
-            render_mem(self._mem, self._mem_history, cpu_avg, la1)
+            render_mem(self._mem, self._mem_history, cpu_avg, la1),
         )
         await self._update_processes()
-        self.query_one("#graph-static", Static).update(
+        self._update_if_changed(
+            "graph-static",
             graph_widget.render_graph(
                 self._graph_data,
                 filter_mode=self._graph_filter,
@@ -1865,21 +1945,17 @@ class M5Watcher(App):
                 cpu_history=self._cpu_history,
                 mem=self._mem,
                 mem_history=self._mem_history,
-            )
+            ),
         )
-        self.query_one("#kpi-static", Static).update(
-            kpi_widget.render_kpi(self._kpi_data)
-        )
+        self._update_if_changed("kpi-static", kpi_widget.render_kpi(self._kpi_data))
         self._render_logs(self._log_entries)
         self._render_sentinel(self._sentinel_data)
 
     def _render_sentinel(self, data: dict) -> None:
         canary_str, alert_str = render_sentinel(data)
-        try:
-            self.query_one("#canary-static", Static).update(canary_str)
-            self.query_one("#alerts-static", Static).update(alert_str)
-        except Exception:
-            pass
+        # sess.1508 round 2: diff cache via helper.
+        self._update_if_changed("canary-static", canary_str)
+        self._update_if_changed("alerts-static", alert_str)
 
     def _render_logs(self, entries: list) -> None:
         lt = self.query_one("#log-table", DataTable)

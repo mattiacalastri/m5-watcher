@@ -9,14 +9,29 @@ Tutte le primitive grafiche vivono in polpo_charts.py (sess.1508 audit).
 """
 from __future__ import annotations
 
+import math
 import time
 from pathlib import Path
 
 from polpo_charts import (
     DIM, TEAL, WHITE,
     HOT_PINK, ELEC_BLUE, LIME, ORANGE,
-    proportional_bar, eur_full, empty_state,
+    proportional_bar, eur_full, eur_compact, empty_state,
 )
+
+
+def _safe_float(v, default: float = 0.0) -> float:
+    """Cast a float, sostituendo NaN/inf con default — sess.1508 round 2.
+
+    KPI source = YAML frontmatter scritto a mano: dati corrotti possibili.
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    if math.isfinite(f):
+        return f
+    return default
 
 _KPI_PATH = (
     Path.home()
@@ -69,7 +84,12 @@ def _bar(pct: float, w: int = 28, color: str = LIME) -> str:
 
 
 def _cold_color(cold_avg: float) -> str:
-    """Allineata sulla scala 0/30/60/90 (= cold_pct). Sess.1508 audit fix."""
+    """Allineata sulla scala 0/30/60/90 (= cold_pct). Sess.1508 audit fix.
+
+    Round 2: dato invalido (negativo o non finito) → DIM, non LIME falso-OK.
+    """
+    if not math.isfinite(cold_avg) or cold_avg < 0:
+        return DIM
     if cold_avg >= _COLD_LIMIT * 2 / 3:   # ≥ 60gg
         return HOT_PINK
     if cold_avg >= _COLD_GOAL:            # ≥ 30gg
@@ -82,18 +102,25 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
     if not kpi:
         return empty_state("🔄", "Leggendo KPI.md dal vault…", "TTL 30s · prima esecuzione ~1s")
 
-    mrr       = float(kpi.get('mrr',               0))
-    mrr_prev  = float(kpi.get('mrr_previous',      mrr))
-    outstand  = float(kpi.get('outstanding',        0))
+    # sess.1508 round 2: NaN/inf guard via _safe_float — KPI.md è scritto a
+    # mano da Mattia, dati corrotti hanno già crashato render storicamente.
+    mrr       = _safe_float(kpi.get('mrr',               0))
+    mrr_prev  = _safe_float(kpi.get('mrr_previous',      mrr), mrr)
+    outstand  = _safe_float(kpi.get('outstanding',        0))
     debtors   = kpi.get('outstanding_debtors')           # ⬅ no più hardcoded "4"
-    pipeline  = float(kpi.get('pipeline_weighted',  0))
-    tot_leads = float(kpi.get('setter_total_leads', 0))
-    active    = float(kpi.get('setter_active',      0))
-    cold_avg  = float(kpi.get('setter_cold_avg',    0))
+    pipeline  = _safe_float(kpi.get('pipeline_weighted',  0))
+    tot_leads = _safe_float(kpi.get('setter_total_leads', 0))
+    active    = _safe_float(kpi.get('setter_active',      0))
+    cold_avg  = _safe_float(kpi.get('setter_cold_avg',    0))
     updated   = kpi.get('updated', '—')
 
+    # sess.1508 round 2: MRR ≥ 1M → eur_compact ("€1.2M") per evitare
+    # overflow riga (15+ char nel layout fisso 14-col label).
+    def _fmt_eur(v: float) -> str:
+        return eur_compact(v) if abs(v) >= 1_000_000 else eur_full(v)
+
     delta       = mrr - mrr_prev
-    delta_s     = ('+' if delta >= 0 else '') + eur_full(delta)
+    delta_s     = ('+' if delta >= 0 else '') + _fmt_eur(delta)
     delta_color = LIME if delta >= 0 else HOT_PINK
     mrr_pct     = min(mrr      / _TARGET_MRR  * 100, 100)
     out_pct     = min(outstand / _TARGET_CASH * 100, 100)
@@ -128,20 +155,20 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
     ]
     lines += row(
         "💰", LIME, "MRR", mrr_pct, LIME,
-        eur_full(mrr),
-        f"[{delta_color}]{delta_s}[/] [{DIM}]vs prev · goal {eur_full(_TARGET_MRR)} · {mrr_pct:.0f}%[/]",
+        _fmt_eur(mrr),
+        f"[{delta_color}]{delta_s}[/] [{DIM}]vs prev · goal {_fmt_eur(_TARGET_MRR)} · {mrr_pct:.0f}%[/]",
     )
     lines.append("")
     lines += row(
         "📌", HOT_PINK, "Outstanding", out_pct, HOT_PINK,
-        eur_full(outstand),
+        _fmt_eur(outstand),
         f"[{DIM}]{out_sub}[/]",
     )
     lines.append("")
     lines += row(
         "🎯", ELEC_BLUE, "Pipeline", pipe_pct, ELEC_BLUE,
-        eur_full(pipeline),
-        f"[{DIM}]weighted · goal {eur_full(_TARGET_PIPE)} · {pipe_pct:.0f}%[/]",
+        _fmt_eur(pipeline),
+        f"[{DIM}]weighted · goal {_fmt_eur(_TARGET_PIPE)} · {pipe_pct:.0f}%[/]",
     )
     lines.append("")
     lines.append(f"  [{DIM}]── PI  Pipeline Indicators  ·  setter · lead commerciali ──────────[/]")

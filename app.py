@@ -1333,37 +1333,45 @@ class TitleBar(Static):
 
         line4 = self.status if self.status else f"[{DIM}]🔄 Probing system…[/]"
 
-        # sess.1539: line5 BUSINESS KPI — Nome KPI · Dato · Unità di Misura.
-        # Visibile in TUTTI i tab (header globale). Compatta sotto 100 cols.
+        # sess.1539 round 2: line5 BUSINESS KPI — Nome · Dato · Unità +
+        # sparkline trend live (MRR/Out/Pipeline). Visibile in TUTTI i tab.
+        # Tier responsive: full(≥100) · compact(≥80) · tiny(<80) — pattern
+        # condiviso, sparkline incluse anche al tier compact (5 char + bar).
         kpi = info.get('kpi') or {}
         if kpi:
-            mrr      = kpi.get('mrr',         0.0)
-            mrr_d    = kpi.get('mrr_delta',   0.0)
-            outstand = kpi.get('outstanding', 0.0)
-            pipe     = kpi.get('pipeline',    0.0)
-            leads    = int(kpi.get('leads',   0))
-            cold_avg = kpi.get('cold_avg',    0.0)
-            d_color  = LIME if mrr_d >= 0 else HOT_PINK
-            d_sign   = '+' if mrr_d >= 0 else ''
+            mrr        = kpi.get('mrr',         0.0)
+            mrr_d      = kpi.get('mrr_delta',   0.0)
+            outstand   = kpi.get('outstanding', 0.0)
+            pipe       = kpi.get('pipeline',    0.0)
+            leads      = int(kpi.get('leads',   0))
+            cold_avg   = kpi.get('cold_avg',    0.0)
+            spark_mrr  = kpi.get('spark_mrr',   '')
+            spark_out  = kpi.get('spark_out',   '')
+            spark_pipe = kpi.get('spark_pipe',  '')
+            d_color    = LIME if mrr_d >= 0 else HOT_PINK
+            d_sign     = '+' if mrr_d >= 0 else ''
+            # Sparkline wrapper: appendi solo se non vuota (≥2 punti storici)
+            sp_mrr  = f"[{LIME}]{spark_mrr}[/] "      if spark_mrr  else ""
+            sp_out  = f"[{HOT_PINK}]{spark_out}[/] "  if spark_out  else ""
+            sp_pipe = f"[{ELEC_BLUE}]{spark_pipe}[/] " if spark_pipe else ""
             if cols >= 100:
                 line5 = (
-                    f"💰 [{DIM}]MRR[/] [bold {LIME}]€{mrr:,.0f}[/] [{d_color}]{d_sign}{mrr_d:,.0f}€[/]"
-                    f"{sep}📌 [{DIM}]Outstanding[/] [bold {HOT_PINK}]€{outstand:,.0f}[/]"
-                    f"{sep}🎯 [{DIM}]Pipeline[/] [bold {ELEC_BLUE}]€{pipe:,.0f}[/]"
+                    f"💰 [{DIM}]MRR[/] {sp_mrr}[bold {LIME}]€{mrr:,.0f}[/] [{d_color}]{d_sign}{mrr_d:,.0f}€[/]"
+                    f"{sep}📌 [{DIM}]Outstanding[/] {sp_out}[bold {HOT_PINK}]€{outstand:,.0f}[/]"
+                    f"{sep}🎯 [{DIM}]Pipeline[/] {sp_pipe}[bold {ELEC_BLUE}]€{pipe:,.0f}[/]"
                     f"{sep}🔥 [{DIM}]Lead[/] [bold {ORANGE}]{leads}[/]"
                     f"{sep}🕐 [{DIM}]Cold[/] [bold {YELLOW}]{cold_avg:.1f} gg[/]"
                 )
             elif cols >= 80:
                 line5 = (
-                    f"💰[bold {LIME}]€{mrr:,.0f}[/] [{d_color}]{d_sign}{mrr_d:,.0f}[/]  "
-                    f"📌[bold {HOT_PINK}]€{outstand:,.0f}[/]  "
-                    f"🎯[bold {ELEC_BLUE}]€{pipe:,.0f}[/]  "
+                    f"💰{sp_mrr}[bold {LIME}]€{mrr:,.0f}[/] [{d_color}]{d_sign}{mrr_d:,.0f}[/]  "
+                    f"📌{sp_out}[bold {HOT_PINK}]€{outstand:,.0f}[/]  "
+                    f"🎯{sp_pipe}[bold {ELEC_BLUE}]€{pipe:,.0f}[/]  "
                     f"🔥[bold {ORANGE}]{leads}[/]  "
                     f"🕐[bold {YELLOW}]{cold_avg:.1f}gg[/]"
                 )
             else:
-                # sess.1539: anche al breakpoint <80 mantieni Nome+Dato+Unità.
-                # Compatto K-notation per restare nello stretto.
+                # Tier tiny: K-notation + Nome+Unità preservati.
                 line5 = (
                     f"💰 [bold {LIME}]€{mrr/1000:.1f}K[/]  "
                     f"📌 [bold {HOT_PINK}]€{outstand/1000:.1f}K[/]  "
@@ -2614,27 +2622,10 @@ class M5Watcher(App):
 
         # Rich-info header (refresh ogni tick fast)
         uptime_s = int(time.time() - self._boot_time)
-        # sess.1539: KPI business per line5 TitleBar (Nome · Dato · Unità).
-        # _kpi_data popolato da _refresh_slow → kpi_widget.read_kpi_data.
-        # Sicuro contro dict vuoto (TitleBar mostra placeholder loading).
-        k = self._kpi_data or {}
-        try:
-            mrr_v       = float(k.get('mrr',                0) or 0)
-            mrr_prev_v  = float(k.get('mrr_previous',       mrr_v) or mrr_v)
-            outstand_v  = float(k.get('outstanding',         0) or 0)
-            pipeline_v  = float(k.get('pipeline_weighted',   0) or 0)
-            active_v    = float(k.get('setter_active',       0) or 0)
-            cold_avg_v  = float(k.get('setter_cold_avg',     0) or 0)
-            kpi_payload = {
-                'mrr':         mrr_v,
-                'mrr_delta':   mrr_v - mrr_prev_v,
-                'outstanding': outstand_v,
-                'pipeline':    pipeline_v,
-                'leads':       active_v,
-                'cold_avg':    cold_avg_v,
-            } if k else {}
-        except (TypeError, ValueError):
-            kpi_payload = {}
+        # sess.1539 round 2: payload KPI via single-source-of-truth in kpi_widget.
+        # Sparkline trend incluse (mrr/out/pipe) — leggono lo stesso _HISTORY_*
+        # popolato da render_kpi → zero divergenza tra panel KPI e TitleBar line5.
+        kpi_payload = kpi_widget.kpi_for_titlebar(self._kpi_data or {})
 
         rich = {
             'session':      self._sess_n,

@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import os
 import time
+from collections import deque
 from pathlib import Path
 
 from polpo_charts import (
@@ -19,6 +20,40 @@ from polpo_charts import (
     HOT_PINK, ELEC_BLUE, LIME, ORANGE,
     proportional_bar, eur_full, eur_compact, empty_state,
 )
+
+# sess.1525: sparkline storico in-memory per MRR/Outstanding/Pipeline.
+# Volatile (deque, no fs write) — si perde al restart, ma il TUI è longevo
+# (uptime tipico 20h+) quindi raccoglie sempre abbastanza punti.
+# maxlen=30 = ~15 minuti di dati a refresh slow 30s = trend recente.
+_HISTORY_MRR:      deque[float] = deque(maxlen=30)
+_HISTORY_OUTSTAND: deque[float] = deque(maxlen=30)
+_HISTORY_PIPELINE: deque[float] = deque(maxlen=30)
+_SPARK_BARS = " ▁▂▃▄▅▆▇█"  # 9 livelli, primo è spazio
+
+
+def _sparkline(values, width: int = 8) -> str:
+    """Render Unicode sparkline of len `width` from sequence of values.
+
+    Edge cases:
+    - <2 punti: stringa vuota (niente trend visibile)
+    - tutti uguali: barra mid (▄) ripetuta
+    - downsample lineare se len > width
+    """
+    vs = list(values)
+    if len(vs) < 2:
+        return ""
+    if len(vs) > width:
+        step = len(vs) / width
+        vs = [vs[int(i * step)] for i in range(width)]
+    elif len(vs) < width:
+        vs = [vs[0]] * (width - len(vs)) + vs
+    lo, hi = min(vs), max(vs)
+    if hi == lo:
+        return _SPARK_BARS[4] * width
+    return "".join(
+        _SPARK_BARS[1 + int((v - lo) / (hi - lo) * 7)]
+        for v in vs
+    )
 
 
 def _safe_float(v, default: float = 0.0) -> float:
@@ -145,6 +180,18 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
     cold_pct    = min(cold_avg / _COLD_LIMIT * 100, 100)
     cold_color  = _cold_color(cold_avg)
 
+    # sess.1525: append ai deque storici per sparkline. Append condizionato:
+    # solo se ultimo valore è cambiato (evita ripetizioni che azzerano min/max).
+    if not _HISTORY_MRR or _HISTORY_MRR[-1] != mrr:
+        _HISTORY_MRR.append(mrr)
+    if not _HISTORY_OUTSTAND or _HISTORY_OUTSTAND[-1] != outstand:
+        _HISTORY_OUTSTAND.append(outstand)
+    if not _HISTORY_PIPELINE or _HISTORY_PIPELINE[-1] != pipeline:
+        _HISTORY_PIPELINE.append(pipeline)
+    spark_mrr  = _sparkline(_HISTORY_MRR)
+    spark_out  = _sparkline(_HISTORY_OUTSTAND)
+    spark_pipe = _sparkline(_HISTORY_PIPELINE)
+
     # Outstanding sub-line: numero debitori dinamico, fallback a stringa neutra
     if debtors is None:
         out_sub = "da incassare"
@@ -168,21 +215,38 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
         f"  [bold {WHITE}]📊 BUSINESS KPI[/]  [{DIM}]· Astra Digital Marketing · {updated}[/]",
         "",
     ]
+    # sess.1525: sparkline trend inline accanto al value
+    mrr_value_str = f"{_fmt_eur(mrr)}  [dim {LIME}]{spark_mrr}[/]" if spark_mrr else _fmt_eur(mrr)
     lines += row(
         "💰", LIME, "MRR", mrr_pct, LIME,
-        _fmt_eur(mrr),
+        mrr_value_str,
         f"[{delta_color}]{delta_s}[/] [{DIM}]vs prev · goal {_fmt_eur(_TARGET_MRR)} · {mrr_pct:.0f}%[/]",
     )
     lines.append("")
+    # sess.1525: alert visivo quando Outstanding > MRR (incassi attesi
+    # superano il fatturato mensile). Da informazione passiva a segnale d'azione.
+    out_critical = outstand > mrr and mrr > 0
+    spark_out_styled = f"  [dim {HOT_PINK}]{spark_out}[/]" if spark_out else ""
+    if out_critical:
+        out_emoji = "⚠️"
+        out_color = "#ff3366"  # polpo_red
+        out_value = f"{_fmt_eur(outstand)}{spark_out_styled}  [bold {out_color}]· CRITICAL[/]"
+        out_sub_styled = f"[bold {out_color}]{out_sub} · supera MRR mensile ({outstand/mrr:.1f}×)[/]"
+    else:
+        out_emoji = "📌"
+        out_color = HOT_PINK
+        out_value = f"{_fmt_eur(outstand)}{spark_out_styled}"
+        out_sub_styled = f"[{DIM}]{out_sub}[/]"
     lines += row(
-        "📌", HOT_PINK, "Outstanding", out_pct, HOT_PINK,
-        _fmt_eur(outstand),
-        f"[{DIM}]{out_sub}[/]",
+        out_emoji, out_color, "Outstanding", out_pct, out_color,
+        out_value,
+        out_sub_styled,
     )
     lines.append("")
+    pipe_value_str = f"{_fmt_eur(pipeline)}  [dim {ELEC_BLUE}]{spark_pipe}[/]" if spark_pipe else _fmt_eur(pipeline)
     lines += row(
         "🎯", ELEC_BLUE, "Pipeline", pipe_pct, ELEC_BLUE,
-        _fmt_eur(pipeline),
+        pipe_value_str,
         f"[{DIM}]weighted · goal {_fmt_eur(_TARGET_PIPE)} · {pipe_pct:.0f}%[/]",
     )
     lines.append("")
@@ -200,3 +264,37 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
         f"[{DIM}]media gg inattività per lead freddo · goal < {int(_COLD_GOAL)} gg[/]",
     )
     return "\n".join(lines)
+
+
+# ─── Public API for TitleBar line5 (sess.1539 round 2) ──────────────────────
+# Single source of truth — app.py importa solo questo, niente _safe_float
+# duplicato né accessi diretti a _HISTORY_*.
+def kpi_for_titlebar(data: dict, spark_w: int = 6) -> dict:
+    """Build payload pronto per TitleBar line5 — Nome · Dato · Unità + sparkline.
+
+    Garanzie:
+    - Tutti i campi numerici NaN/inf-safe via _safe_float.
+    - Sparkline letti dai medesimi _HISTORY_* deque popolati da render_kpi
+      (zero divergenza tra panel KPI e TitleBar).
+    - Width sparkline default 6 (compatto per cintura header).
+
+    Returns:
+        dict con chiavi mrr/mrr_delta/outstanding/pipeline/leads/cold_avg
+        + spark_mrr/spark_out/spark_pipe (str unicode).
+        Empty dict {} se data vuoto.
+    """
+    if not data:
+        return {}
+    mrr      = _safe_float(data.get('mrr',                0))
+    mrr_prev = _safe_float(data.get('mrr_previous',      mrr), mrr)
+    return {
+        'mrr':         mrr,
+        'mrr_delta':   mrr - mrr_prev,
+        'outstanding': _safe_float(data.get('outstanding',         0)),
+        'pipeline':    _safe_float(data.get('pipeline_weighted',   0)),
+        'leads':       _safe_float(data.get('setter_active',       0)),
+        'cold_avg':    _safe_float(data.get('setter_cold_avg',     0)),
+        'spark_mrr':   _sparkline(_HISTORY_MRR,      spark_w),
+        'spark_out':   _sparkline(_HISTORY_OUTSTAND, spark_w),
+        'spark_pipe':  _sparkline(_HISTORY_PIPELINE, spark_w),
+    }

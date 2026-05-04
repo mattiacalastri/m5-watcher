@@ -5,6 +5,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 
 ---
 
+## [2.5.1] — 2026-05-05 · Sparkline trend in line5 + single-source API (sess.1539 round 2)
+
+**Released sess.1539 round 2** — line5 KPI passa da snapshot statico a
+trend monitor live. Sparkline inline (MRR/Out/Pipeline) leggono lo stesso
+deque history del KPI tab → zero divergenza tra panel e header.
+
+### Added
+- **`kpi_widget.kpi_for_titlebar(data, spark_w=6)`** — nuova API pubblica,
+  single source of truth per line5. Restituisce dict normalizzato con
+  mrr/mrr_delta/outstanding/pipeline/leads/cold_avg + sparkline unicode
+  (spark_mrr/spark_out/spark_pipe). NaN/inf safe via `_safe_float`.
+- **Sparkline inline in line5** — trend visivo `▁▂▃▄▅▆▇█` accanto al valore
+  numerico. Tier full+compact, omessi al tier tiny per spazio. Cresce dopo
+  ≥2 punti history (15 min di dati a refresh slow 30s).
+- **+4 test sess.1539 round 2** — kpi_for_titlebar empty/shape/sparkline/NaN.
+
+### Changed
+- **`_update_subtitle`** — collassato blocco 17 righe `_safe_float` ripetuto
+  6× + try/except in 1 chiamata `kpi_widget.kpi_for_titlebar()`. Refactor
+  zero-regression: stessa shape payload, semantica preservata.
+- **line5 builder** — sparkline-aware: il prefix `[COLOR]bars[/]` viene
+  aggiunto solo quando history ≥2 punti, non rompe il layout responsive.
+
+---
+
 ## [2.5.0] — 2026-05-04 · Unified Header + KPI line5 (sess.1539)
 
 **Released sess.1539** — header coerente cross-tab e KPI business sempre

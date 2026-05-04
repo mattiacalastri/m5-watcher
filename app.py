@@ -82,6 +82,16 @@ import graph_widget
 import kpi_widget
 import polpo_charts as pc_const   # sess.1508 round 3: shared constants (PRESSURE_*, ALERT_*)
 
+# ── Telemetry spine (sess.1508 round 4) ──────────────────────────────────────
+from metrics import (
+    Metrics, setup_logger, JsonlWriter, render_debug_panel,
+)
+
+logger  = setup_logger()
+metrics = Metrics()
+jsonl   = JsonlWriter(flush_every=1)
+logger.info("m5-watcher boot · pid=%d", os.getpid())
+
 # ── Design tokens ──────────────────────────────────────────────────────────────
 _TOKENS = json.loads((Path(__file__).parent / "polpo.tokens.json").read_text())
 P = _TOKENS["palette"]
@@ -1568,6 +1578,8 @@ class M5Watcher(App):
         Binding("f",   "cycle_graph_filter", "Filter",  show=True),
         Binding("c",   "triage",             "Triage",  show=True),
         Binding("k",   "kill_tent_selected", "Kill",    show=True),
+        Binding("s",   "snapshot",           "📸 Snap", show=True),
+        Binding("d",   "show_tab_debug",     "🔬 Debug", show=True),
         Binding("?",   "show_help",          "Help",    show=True),
     ]
 
@@ -1613,6 +1625,13 @@ class M5Watcher(App):
         self._idle_ticks: int = 0
         self._critical_until: float = 0.0
         self._critical_flash_active: bool = False
+        # sess.1508 round 4 telemetry spine (claim verifiability)
+        self._metrics      = metrics
+        self._jsonl_writer = jsonl
+        self._py_logger       = logger
+        self._prev_idle_frozen: bool = False
+        # Webhook URL hidratato da main() via class attr (sess.1508 round 4)
+        self._webhook_url: str | None = getattr(self.__class__, "_webhook_url", None)
         # sess.1508 audit fix: cache last-rendered widget content per evitare
         # Static.update() inutili quando il contenuto non cambia (era il caso
         # del feed-static aggiornato ogni 2s anche con deque immutata).
@@ -1670,6 +1689,10 @@ class M5Watcher(App):
                         yield Static("", id="canary-static")
                     with ScrollableContainer(id="alerts-panel"):
                         yield Static("", id="alerts-static")
+            # sess.1508 round 4: telemetry spine — claim verifiability live.
+            with TabPane("🔬 Debug", id="tab-debug"):
+                with ScrollableContainer(id="debug-scroll"):
+                    yield Static("", id="debug-static")
         with Horizontal(id="top-row"):
             with ScrollableContainer(id="cpu-panel"):
                 yield Static(
@@ -1783,7 +1806,7 @@ class M5Watcher(App):
             pass
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
-        fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent"}
+        fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent", "tab-debug"}
         hide = event.pane is not None and event.pane.id in fullscreen_tabs
         self.query_one("#top-row").display = not hide
 
@@ -1806,9 +1829,20 @@ class M5Watcher(App):
         self.set_interval(2.0, self._refresh_fast)
         await asyncio.sleep(0.3)
         self.set_interval(5.0, self._refresh_slow)
+        # sess.1508 round 4: telemetry spine intervals
+        self.set_interval(2.0, self._refresh_debug_panel)
+        self.set_interval(60.0, self._flush_metrics)
+        self._metrics.record_rss()  # baseline
         # Immediate initial load — all panels (incl. Graph + KPI) visible on startup
         await self._refresh_fast()
         await self._refresh_slow()
+
+    def _flush_metrics(self) -> None:
+        """Append snapshot JSONL ogni 60s — sess.1508 round 4."""
+        try:
+            self._jsonl_writer.flush_metrics(self._metrics)
+        except Exception as e:
+            self._py_logger.exception("flush_metrics fail: %s", e)
 
     def _init_tables(self) -> None:
         pt = self.query_one("#proc-table", DataTable)
@@ -1818,12 +1852,14 @@ class M5Watcher(App):
         lt = self.query_one("#log-table", DataTable)
         lt.add_columns("Time", " ", "Event", "Source", "Detail")
 
-    # ── Critical flash (sess.1508 round 3 motion) ────────────────────────────
+    # ── Critical flash (sess.1508 round 3 motion + round 4 webhook) ──────────
     def _trigger_critical_flash(self, reason: str = "") -> None:
         """Border bottom HOT_PINK per 5s — l'app urla quando lo deve.
 
         Triggerato da: pressure='error', CPU spike sostenuto.
         Auto-revert via _refresh_fast tick.
+        Round 4: metric + log + webhook fire-and-forget se config TOML
+        ha [webhook] url.
         """
         if self._paused or self._critical_flash_active:
             return
@@ -1832,10 +1868,29 @@ class M5Watcher(App):
             tb.styles.border_bottom = ("heavy", HOT_PINK)
             self._critical_flash_active = True
             self._critical_until = time.time() + 5.0
+            self._metrics.flash(reason or "unspecified")
+            self._py_logger.info("critical flash: %s", reason)
             if reason:
                 self.notify(f"⚠ CRITICAL: {reason}", severity="error", timeout=4.0)
-        except Exception:
-            pass
+        except Exception as e:
+            self._py_logger.exception("trigger_critical_flash fail: %s", e)
+        # Webhook fire-and-forget (sess.1508 round 4)
+        if self._webhook_url:
+            try:
+                import cli_commands
+                cli_commands.webhook_post(
+                    self._webhook_url,
+                    {
+                        "event":     "critical_flash",
+                        "reason":    reason,
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "cpu_avg":   self._cpu_avg() if self._cpu_percents else 0.0,
+                        "mem_pct":   self._mem.get("pct", 0.0),
+                        "pressure":  str(self._mem.get("pressure", ("—", "ok"))[0]),
+                    },
+                )
+            except Exception as e:
+                self._py_logger.exception("webhook_post fail: %s", e)
 
     def _end_critical_flash(self) -> None:
         """Revert border al colore default (TEAL o ORANGE se paused)."""
@@ -1847,25 +1902,31 @@ class M5Watcher(App):
         except Exception:
             pass
 
-    # ── Render cache helper (sess.1508 round 2) ──────────────────────────────
+    # ── Render cache helper (sess.1508 round 2 + round 4 telemetry) ──────────
     def _update_if_changed(self, widget_id: str, content: str) -> None:
         """Static.update solo se il contenuto è diverso dal cache.
 
         Risolve audit perf round 2: render_*() chiamato N volte/s anche su
         dati invariati → forced repaint. Skip update se hash uguale.
+        Round 4: registra cache hit/miss in self._metrics per claim
+        verifiability.
         """
         if self._render_cache.get(widget_id) == content:
+            self._metrics.cache_hit()
             return
+        self._metrics.cache_miss()
         self._render_cache[widget_id] = content
         try:
             self.query_one(f"#{widget_id}", Static).update(content)
-        except Exception:
-            pass
+        except Exception as e:
+            self._py_logger.exception("_update_if_changed widget=%s fail: %s", widget_id, e)
 
     # ── Refresh ───────────────────────────────────────────────────────────────
     async def _refresh_fast(self) -> None:
         if self._paused:
             return
+        # sess.1508 round 4 telemetry: misura frame_ms (claim verifiability).
+        _t_start = time.perf_counter()
         self._tick += 1
 
         self._cpu_percents, self._disk, self._net = await asyncio.gather(
@@ -1894,15 +1955,11 @@ class M5Watcher(App):
 
         # ── Idle freeze rainbow (sess.1508 round 3): system quiet → motion quiet.
         # Soglia 5% per 30 tick (~60s a 2s/tick). Auto-revive su prossimo spike.
+        # NB: il toggle vero (con edge counters) è eseguito in fondo a _refresh_fast.
         if overall < 5.0:
             self._idle_ticks += 1
         else:
             self._idle_ticks = 0
-        try:
-            tb = self.query_one("#title-bar", TitleBar)
-            tb.idle_frozen = (self._idle_ticks >= 30)
-        except Exception:
-            pass
 
         # ── Critical flash auto-revert (sess.1508 round 3) ────────────────────
         if self._critical_flash_active and time.time() >= self._critical_until:
@@ -1947,10 +2004,28 @@ class M5Watcher(App):
         # ── Feed widget: skip update se invariato (sess.1508 audit fix).
         self._update_if_changed("feed-static", _UNIFEED_HDR + render_feed(self._event_feed))
         self._update_subtitle(overall, la1)
+        # ── Idle freeze edge-detect (sess.1508 round 4 telemetry counters) ──
+        try:
+            tb = self.query_one("#title-bar", TitleBar)
+            new_frozen = (self._idle_ticks >= 30)
+            if new_frozen and not self._prev_idle_frozen:
+                self._metrics.idle_enter()
+            elif not new_frozen and self._prev_idle_frozen:
+                self._metrics.idle_exit()
+            self._prev_idle_frozen = new_frozen
+            tb.idle_frozen = new_frozen
+        except Exception as e:
+            self._py_logger.exception("idle_frozen toggle fail: %s", e)
+        # ── Frame timing record (sess.1508 round 4)
+        _ms = (time.perf_counter() - _t_start) * 1000.0
+        self._metrics.record_frame(_ms)
+        if _ms > 500:
+            self._py_logger.warning("slow _refresh_fast: %.1fms (tick #%d)", _ms, self._tick)
 
     async def _refresh_slow(self) -> None:
         if self._paused:
             return
+        _t_slow = time.perf_counter()
         (self._mem, self._bat, self._proc_counts, self._graph_data,
          self._kpi_data, self._focus_data, self._log_entries,
          self._sentinel_data) = await asyncio.gather(
@@ -2045,6 +2120,9 @@ class M5Watcher(App):
         self._update_if_changed("kpi-static", kpi_widget.render_kpi(self._kpi_data))
         self._render_logs(self._log_entries)
         self._render_sentinel(self._sentinel_data)
+        # sess.1508 round 4 telemetry: slow_ms + RSS poll
+        self._metrics.record_slow((time.perf_counter() - _t_slow) * 1000.0)
+        self._metrics.record_rss()
 
     def _render_sentinel(self, data: dict) -> None:
         canary_str, alert_str = render_sentinel(data)
@@ -2242,6 +2320,47 @@ class M5Watcher(App):
         n_canaries = len(self._sentinel_data.get("canaries", {}))
         self.notify(f"🛡  Sentinel  ·  {n_canaries} canary  ·  {n_alerts} alerts", timeout=1.5)
 
+    def action_show_tab_debug(self) -> None:
+        """Tab telemetry spine — sess.1508 round 4."""
+        self.query_one(TabbedContent).active = "tab-debug"
+        s = self._metrics.summary()
+        self.notify(
+            f"🔬  Debug  ·  frame p95 {s['frame_ms']['p95']:.0f}ms  ·  "
+            f"cache {s['cache']['ratio']*100:.1f}%  ·  flash {s['flash']['count']}",
+            timeout=2.0,
+        )
+
+    def _refresh_debug_panel(self) -> None:
+        """Aggiorna #debug-static. Chiamato da set_interval(2.0, ...) in on_mount."""
+        try:
+            content = render_debug_panel(self._metrics, lru_funcs=[_rainbow_hex])
+            self._update_if_changed("debug-static", content)
+        except Exception as e:
+            self._py_logger.exception("refresh_debug_panel fail: %s", e)
+
+    async def action_snapshot(self) -> None:
+        """Snapshot JSON in ~/.local/run/m5-watcher/snapshot_<ts>.json — sess.1508 round 4."""
+        import cli_commands
+        ts = time.strftime("%Y%m%dT%H%M%S")
+        snap_dir = Path.home() / ".local" / "run" / "m5-watcher"
+        try:
+            snap_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.notify(f"📸 mkdir fail: {e}", severity="error", timeout=3.0)
+            return
+        dest = snap_dir / f"snapshot_{ts}.json"
+        snap_args = argparse.Namespace(output=str(dest), pretty=True)
+        try:
+            rc = await asyncio.to_thread(cli_commands.cmd_snapshot, snap_args)
+            if rc == 0:
+                self.notify(f"📸 snapshot → {dest.name}", severity="information", timeout=3.0)
+                self._py_logger.info("snapshot saved: %s", dest)
+            else:
+                self.notify("📸 snapshot fallita — vedi log", severity="error", timeout=3.0)
+        except Exception as e:
+            self._py_logger.exception("action_snapshot fail: %s", e)
+            self.notify(f"📸 errore snapshot: {e}", severity="error", timeout=3.0)
+
     def action_triage(self) -> None:
         self.push_screen(TriageScreen())
 
@@ -2249,7 +2368,7 @@ class M5Watcher(App):
         """Cheat sheet keybinding (sess.1508 audit fix: discoverability)."""
         self.notify(
             "🐙 KEYS · q quit · r refresh · p pause · 1-8 tabs · "
-            "f filter graph · c triage · k kill tentacolo selezionato",
+            "f filter · c triage · k kill · s snapshot · d debug",
             severity="information",
             timeout=8.0,
         )
@@ -2363,7 +2482,9 @@ def _apply_user_config(cfg: dict) -> None:
 
 
 def main() -> None:
-    """CLI entrypoint con flag a11y + configurability (sess.1508 round 3)."""
+    """CLI entrypoint con flag a11y + configurability + subcommands (round 4)."""
+    import cli_commands
+
     parser = argparse.ArgumentParser(
         prog="m5-watcher",
         description="🐙 M5 Max Watcher — Visual Analytics TUI for Apple Silicon.",
@@ -2382,13 +2503,24 @@ def main() -> None:
                         help="Verbose logging (futuro: log file).")
     parser.add_argument("--version", action="version",
                         version=f"m5-watcher {__version__} ({__codename__})")
+
+    # sess.1508 round 4: subcommands snapshot/tail-feed/export-kpi/health
+    cli_commands.add_subparsers(parser)
+
     args = parser.parse_args()
 
-    # Apply config file overrides PRIMA di costruire l'app
+    # Subcommand dispatch — exit before launching TUI
+    if getattr(args, "cmd", None) is not None:
+        handler = getattr(args, "func", None)
+        if handler is not None:
+            raise SystemExit(handler(args))
+        parser.print_help()
+        raise SystemExit(1)
+
+    # ── TUI path (no subcommand) ──────────────────────────────────────────────
     cfg = _load_user_config(args.config)
     _apply_user_config(cfg)
 
-    # CLI flags overridano sia default che config file
     if args.high_contrast:
         os.environ["M5W_HIGH_CONTRAST"] = "1"
     if args.no_rainbow:
@@ -2397,6 +2529,9 @@ def main() -> None:
         os.environ["M5W_NO_ASCII"] = "1"
     if args.ascii:
         os.environ["M5W_FORCE_ASCII"] = "1"
+
+    # sess.1508 round 4: hydrate webhook URL da config [webhook] url
+    M5Watcher._webhook_url = cfg.get("webhook", {}).get("url") or None
 
     M5Watcher().run()
 

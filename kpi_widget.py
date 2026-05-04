@@ -10,6 +10,7 @@ Tutte le primitive grafiche vivono in polpo_charts.py (sess.1508 audit).
 from __future__ import annotations
 
 import math
+import os
 import time
 from pathlib import Path
 
@@ -33,11 +34,13 @@ def _safe_float(v, default: float = 0.0) -> float:
         return f
     return default
 
-_KPI_PATH = (
+_DEFAULT_KPI_PATH = (
     Path.home()
     / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Astra Digital Marketing"
     / "KPI.md"
 )
+# Override esplicito via env M5W_KPI_PATH — abilita uso fuori dal Mac di Mattia.
+_KPI_PATH = Path(os.environ.get("M5W_KPI_PATH", str(_DEFAULT_KPI_PATH))).expanduser()
 
 _cache:    dict | None = None
 _cache_ts: float       = 0.0

@@ -1,21 +1,44 @@
-"""M5 Max data sources — no sudo required."""
+"""M5 Max data sources — no sudo required.
+
+Filesystem liberation (sess.1510): tutto subprocess macOS-only ha fallback
+psutil per Linux/Intel-Mac. Path Mattia-only sostituibili via env / setter.
+"""
 from __future__ import annotations
 
 import asyncio
+import platform
 import re
+import resource
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
 import psutil
 
-PAGE_SIZE = 16384  # Apple Silicon page size (bytes)
+# ── Platform detection ────────────────────────────────────────────────────────
+IS_MACOS = sys.platform == 'darwin'
+IS_LINUX = sys.platform.startswith('linux')
+
+# Page size autodetect (Apple Silicon = 16384, x86 / Linux = typically 4096).
+PAGE_SIZE = resource.getpagesize()
 
 
 def _sysctl_int(key: str, default: int) -> int:
+    if not IS_MACOS:
+        return default
     try:
         return int(subprocess.check_output(['sysctl', '-n', key]).decode().strip())
+    except (subprocess.CalledProcessError, OSError, ValueError):
+        return default
+
+
+def _sysctl_str(key: str, default: str = '') -> str:
+    if not IS_MACOS:
+        return default
+    try:
+        return subprocess.check_output(['sysctl', '-n', key]).decode().strip()
     except (subprocess.CalledProcessError, OSError, ValueError):
         return default
 
@@ -26,23 +49,60 @@ def _detect_clusters() -> tuple[int, int]:
     e = _sysctl_int('hw.perflevel1.physicalcpu', 0)  # efficiency cluster
     if p > 0 and e > 0:
         return e, p
-    # Fallback: non-Apple-Silicon (Intel Mac, Linux CI). Split physical cores 50/50.
+    # Fallback: non-Apple-Silicon (Intel Mac, Linux CI). All cores treated as P-cores
+    # (no asymmetric cluster detection). E_CORES=0 indica "no efficiency cluster".
     total = psutil.cpu_count(logical=False) or psutil.cpu_count(logical=True) or 8
-    half = max(1, total // 2)
-    return half, total - half
+    return 0, total
+
+
+def _detect_chip_name() -> str:
+    """User-friendly chip name for TitleBar. Tries macOS sysctl first, then platform."""
+    brand = _sysctl_str('machdep.cpu.brand_string')
+    if brand:
+        # Examples: "Apple M5 Max", "Apple M2", "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz"
+        if brand.startswith('Apple '):
+            return brand[len('Apple '):]
+        return brand
+    proc = platform.processor() or platform.machine() or 'Unknown CPU'
+    return proc
 
 
 # Apple Silicon clusters — M5 Max (6+12=18), M4 Max (4+10=14), M1 Pro (2+6/2+8), etc.
 E_CORES, P_CORES = _detect_clusters()
 
-POLPO_PROCS = {
+# Top-level identity for TitleBar (consumed by app.py).
+CHIP_NAME = _detect_chip_name()
+TOTAL_RAM_GB = psutil.virtual_memory().total // (1024 ** 3)
+
+POLPO_PROCS: dict[str, str] = {
     'ollama': '🧠', 'claude': '🐙', 'python3': '🐍', 'python': '🐍',
     'node': '📦', 'n8n': '⚡', 'redis': '🔴', 'postgres': '🐘',
     'comfyui': '🎨', 'warp': '🚀', 'ngrok': '🌐', 'railway': '🚂',
 }
 
 
-def unified_memory() -> dict:
+def set_polpo_procs(names: list[tuple[str, str]]) -> None:
+    """Append (keyword, emoji) pairs to POLPO_PROCS — never overwrites existing keys.
+
+    Pensato per app.py: l'utente può estendere la lista processi tracciati senza
+    forkare data_sources.
+    """
+    for kw, emoji in names:
+        POLPO_PROCS.setdefault(kw, emoji)
+
+
+def _pressure_label(free_ratio: float, swap_pct: float) -> tuple[str, str]:
+    """Pressione memoria condivisa fra macOS e fallback Linux."""
+    if free_ratio < 0.05 or swap_pct > 0.90:
+        return ('CRITICAL', 'error')
+    if free_ratio < 0.15 or swap_pct > 0.70:
+        return ('HIGH', 'warning')
+    if free_ratio < 0.35 or swap_pct > 0.40:
+        return ('MODERATE', 'info')
+    return ('NORMAL', 'ok')
+
+
+def _unified_memory_macos() -> dict:
     out = subprocess.check_output(['vm_stat']).decode()
     pages: dict[str, int] = {}
     for line in out.splitlines():
@@ -50,9 +110,7 @@ def unified_memory() -> dict:
         if m:
             pages[m.group(1).strip()] = int(m.group(2)) * PAGE_SIZE
 
-    total = psutil.virtual_memory().total
-    if total == 0:
-        total = 1
+    total = psutil.virtual_memory().total or 1
     wired      = pages.get('Pages wired down', 0)
     active     = pages.get('Pages active', 0)
     inactive   = pages.get('Pages inactive', 0)
@@ -63,33 +121,75 @@ def unified_memory() -> dict:
     swap_pct   = swap / swap_info.total if swap_info.total > 0 else 0.0
 
     used = total - free
-    pct  = used / total * 100
-
-    if free / total < 0.05 or swap_pct > 0.90:
-        pressure = ('CRITICAL', 'error')
-    elif free / total < 0.15 or swap_pct > 0.70:
-        pressure = ('HIGH', 'warning')
-    elif free / total < 0.35 or swap_pct > 0.40:
-        pressure = ('MODERATE', 'info')
-    else:
-        pressure = ('NORMAL', 'ok')
-
     return {
         'total': total, 'used': used, 'free': free,
         'wired': wired, 'active': active, 'inactive': inactive,
         'compressed': compressed, 'swap': swap,
-        'pct': pct, 'pressure': pressure,
+        'pct': used / total * 100,
+        'pressure': _pressure_label(free / total, swap_pct),
     }
 
 
+def _unified_memory_psutil() -> dict:
+    """Fallback Linux/altri — stessa shape del dict macOS.
+
+    Mapping: wired ← used kernel mem, compressed ← buffers, active/inactive ← psutil.
+    Mantiene tutte le chiavi consumate da render_mem.
+    """
+    vm = psutil.virtual_memory()
+    swap_info = psutil.swap_memory()
+    total = vm.total or 1
+    free = vm.available  # equivalente operativo del "free" macOS
+    used = total - free
+    swap_pct = swap_info.used / swap_info.total if swap_info.total > 0 else 0.0
+
+    # Campi opzionali su Linux/Windows — getattr con default 0 evita AttributeError.
+    wired      = getattr(vm, 'used', used)
+    active     = getattr(vm, 'active', 0)
+    inactive   = getattr(vm, 'inactive', 0)
+    compressed = getattr(vm, 'buffers', 0)
+
+    return {
+        'total': total, 'used': used, 'free': free,
+        'wired': wired, 'active': active, 'inactive': inactive,
+        'compressed': compressed, 'swap': swap_info.used,
+        'pct': used / total * 100,
+        'pressure': _pressure_label(free / total, swap_pct),
+    }
+
+
+def unified_memory() -> dict:
+    if IS_MACOS:
+        try:
+            return _unified_memory_macos()
+        except (subprocess.CalledProcessError, OSError):
+            # vm_stat assente / TCC blocca subprocess → degrada a psutil.
+            return _unified_memory_psutil()
+    return _unified_memory_psutil()
+
+
 def battery() -> dict:
-    try:
-        out = subprocess.check_output(['pmset', '-g', 'ps']).decode()
-        charging = 'AC Power' in out or 'charged' in out
-        m = re.search(r'(\d+)%', out)
-        return {'pct': int(m.group(1)) if m else 100, 'charging': charging}
-    except Exception:
-        return {'pct': 100, 'charging': True}
+    """Stato batteria. Su non-macOS usa psutil.sensors_battery() o AC fallback."""
+    if IS_MACOS:
+        try:
+            out = subprocess.check_output(['pmset', '-g', 'ps']).decode()
+            charging = 'AC Power' in out or 'charged' in out
+            m = re.search(r'(\d+)%', out)
+            return {'pct': int(m.group(1)) if m else 100, 'charging': charging}
+        except (subprocess.CalledProcessError, OSError):
+            return {'pct': 100, 'charging': True}
+
+    sensors = getattr(psutil, 'sensors_battery', None)
+    if sensors is None:
+        return {'pct': 100, 'charging': True, 'time_left': 'AC'}
+    info = sensors()
+    if info is None:
+        return {'pct': 100, 'charging': True, 'time_left': 'AC'}
+    return {
+        'pct': int(info.percent),
+        'charging': bool(info.power_plugged),
+        'time_left': 'AC' if info.power_plugged else f'{info.secsleft // 60}m',
+    }
 
 
 async def cpu_per_core() -> list[float]:
@@ -392,12 +492,20 @@ def triage_processes() -> list[dict]:
             la_match = _match_launchagent(haystack)
             if la_match or ('com.astra' in haystack) or ('polpo' in haystack and ppid == 1):
                 label, la_id = la_match or ('Polpo Daemon', 'com.astra.unknown')
+                if IS_MACOS:
+                    reason = f'LaunchAgent — meglio: launchctl stop {la_id}'
+                    kill_cmd = f'launchctl stop {la_id}'
+                else:
+                    # Linux: niente launchctl. systemctl --user è il pattern equivalente,
+                    # con kill -TERM <pid> come fallback universale.
+                    reason = f'Daemon — systemctl --user stop {la_id} (fallback: kill {pid})'
+                    kill_cmd = f'systemctl --user stop {la_id} || kill -TERM {pid}'
                 results.append({
                     'pid': pid, 'name': name, 'label': label,
                     'mem_mb': mem_mb, 'cpu': cpu,
                     'bucket': BUCKET_CAUTIOUS,
-                    'reason': f'LaunchAgent — meglio: launchctl stop {la_id}',
-                    'kill_cmd': f'launchctl stop {la_id}',
+                    'reason': reason,
+                    'kill_cmd': kill_cmd,
                     'proc_type': 'launchagent',
                 })
                 seen.add(pid)
@@ -582,6 +690,19 @@ _LOG_SOURCES: list[tuple[str, str, str]] = [
     ("~/Library/Logs/astra/apple_notes_sync.log",          "📝", "Notes Sync"),
     ("/tmp/astra_outreach_daemon.err.log",                 "⚠️", "Outreach Err"),
 ]
+
+
+def set_log_sources(extra: list[tuple[str, str, str]]) -> None:
+    """Append (path, emoji, label) tuples a _LOG_SOURCES — non sovrascrive mai.
+
+    Usato da app.py / utenti per registrare log custom senza forkare il modulo.
+    Duplicati esatti (stessa tupla) vengono saltati.
+    """
+    existing = set(_LOG_SOURCES)
+    for entry in extra:
+        if entry not in existing:
+            _LOG_SOURCES.append(entry)
+            existing.add(entry)
 
 _TS_RE = [
     re.compile(r'\[[\w_ ]+\s+(\d{2}:\d{2}:\d{2})\]'),     # [service HH:MM:SS]

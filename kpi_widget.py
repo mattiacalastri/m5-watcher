@@ -281,9 +281,12 @@ def kpi_for_titlebar(data: dict, spark_w: int = 6) -> dict:
     Returns:
         dict con chiavi mrr/mrr_delta/outstanding/pipeline/leads/cold_avg
         + spark_mrr/spark_out/spark_pipe (str unicode).
-        Empty dict {} se data vuoto.
+        Empty dict {} se data vuoto o non-dict (sess.1539 round 3 hardening).
     """
-    if not data:
+    # sess.1539 round 3: guard non-dict (list/int/str/None). YAML parser
+    # malformato può ritornare list al posto di dict → AttributeError nel
+    # main loop _update_subtitle ogni 1s. Fallback graceful a {}.
+    if not data or not isinstance(data, dict):
         return {}
     mrr      = _safe_float(data.get('mrr',                0))
     mrr_prev = _safe_float(data.get('mrr_previous',      mrr), mrr)

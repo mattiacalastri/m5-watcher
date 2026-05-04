@@ -522,19 +522,92 @@ class TestHeadlessTextual(unittest.IsolatedAsyncioTestCase):
             self.assertIn('gg', line5, f"line5 missing gg unit: {line5[:200]}")
 
     async def test_titlebar_uniform_height_across_tabs(self):
-        """sess.1539: TitleBar non deve cambiare altezza tra tab data-dense
-        e tab strategici (rimosso shrink is_dense)."""
+        """sess.1539 round 3: TitleBar height uniforme su TUTTI i 9 tab
+        (era 5/9 — review feedback: tent=4 mancante, completata coverage)."""
         from app import M5Watcher, TitleBar
         async with M5Watcher().run_test(headless=True) as pilot:
             tb = pilot.app.query_one("#title-bar", TitleBar)
             heights = []
-            for key in ("1", "2", "3", "7", "9"):  # heat, stats, procs, logs, debug
+            # 1=heat 2=stats 3=procs 4=tent 5=graph 6=kpi 7=logs 8=sent 9=debug
+            for key in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
                 await pilot.press(key)
                 await pilot.pause(0.05)
                 heights.append(tb.styles.height)
-            # tutti uguali → uniforme cross-tab
             self.assertEqual(len(set(str(h) for h in heights)), 1,
                              f"TitleBar height varies across tabs: {heights}")
+
+    async def test_titlebar_line5_responsive_three_tiers(self):
+        """sess.1539 round 3: rendering a tutti e 3 i breakpoint cols
+        (full ≥100, compact ≥80, tiny <80). Review feedback: prima solo full
+        testato — assertIn('gg', ...) sarebbe FAILED al tier tiny perché lì
+        cold_avg è omesso. Verifica € presente in TUTTI i tier."""
+        from app import M5Watcher, TitleBar
+        async with M5Watcher().run_test(headless=True) as pilot:
+            tb = pilot.app.query_one("#title-bar", TitleBar)
+            pilot.app._kpi_data = {
+                'mrr': 4124.0, 'mrr_previous': 3624.0,
+                'outstanding': 5009.0, 'pipeline_weighted': 48668.0,
+                'setter_active': 274.0, 'setter_cold_avg': 43.3,
+            }
+            pilot.app._update_subtitle(cpu=10.0, load=2.0)
+            for cols in (120, 90, 70):
+                with self.subTest(cols=cols):
+                    rich_info = dict(tb.rich_info)
+                    rich_info['cols'] = cols
+                    tb.rich_info = rich_info
+                    tb._last_paint = None
+                    tb._repaint()
+                    line5 = tb._last_paint[5] if tb._last_paint else ''
+                    self.assertIn('€', line5,
+                                  f"cols={cols}: missing € — {line5[:100]}")
+
+    async def test_titlebar_line5_negative_delta_uses_hot_pink(self):
+        """sess.1539 round 3: mrr_delta < 0 → HOT_PINK color path.
+        Review feedback: solo positivo era testato."""
+        from app import M5Watcher, TitleBar, HOT_PINK
+        async with M5Watcher().run_test(headless=True) as pilot:
+            tb = pilot.app.query_one("#title-bar", TitleBar)
+            pilot.app._kpi_data = {
+                'mrr': 3000.0, 'mrr_previous': 4000.0,  # delta -1000
+                'outstanding': 5000.0, 'pipeline_weighted': 10000.0,
+                'setter_active': 100.0, 'setter_cold_avg': 50.0,
+            }
+            pilot.app._update_subtitle(cpu=10.0, load=2.0)
+            tb._last_paint = None
+            tb._repaint()
+            line5 = tb._last_paint[5] if tb._last_paint else ''
+            self.assertIn(HOT_PINK, line5,
+                          f"negative delta should use HOT_PINK: {line5[:200]}")
+            self.assertIn('-', line5, f"negative sign missing: {line5[:200]}")
+
+    async def test_titlebar_line5_sparkline_true_branch_renders(self):
+        """sess.1539 round 3: rendering line5 quando sparkline non vuota.
+        Review feedback: i 3 ternari [COLOR]bars[/] hanno solo FALSE branch
+        testato (history vuota in test_titlebar_kpi_line5)."""
+        import kpi_widget as _kw
+        from app import M5Watcher, TitleBar
+        # Seed _HISTORY_* con punti differenti → sparkline ≥2 char
+        for h in (_kw._HISTORY_MRR, _kw._HISTORY_OUTSTAND, _kw._HISTORY_PIPELINE):
+            h.clear()
+        for v in (3000, 3300, 3600, 3900, 4124):
+            _kw._HISTORY_MRR.append(v)
+            _kw._HISTORY_OUTSTAND.append(v + 800)
+            _kw._HISTORY_PIPELINE.append(v * 10)
+        async with M5Watcher().run_test(headless=True) as pilot:
+            tb = pilot.app.query_one("#title-bar", TitleBar)
+            pilot.app._kpi_data = {
+                'mrr': 4124.0, 'mrr_previous': 3624.0,
+                'outstanding': 5009.0, 'pipeline_weighted': 48668.0,
+                'setter_active': 274.0, 'setter_cold_avg': 43.3,
+            }
+            pilot.app._update_subtitle(cpu=10.0, load=2.0)
+            tb._last_paint = None
+            tb._repaint()
+            line5 = tb._last_paint[5] if tb._last_paint else ''
+            # Almeno una barra unicode sparkline visibile
+            spark_chars = set('▁▂▃▄▅▆▇█')
+            self.assertTrue(any(c in line5 for c in spark_chars),
+                            f"no sparkline char in line5: {line5[:200]}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -579,14 +652,19 @@ class TestKpiWidget(unittest.TestCase):
     def test_kpi_for_titlebar_sparkline_grows_with_history(self):
         """sess.1539 round 2: sparkline non vuota dopo ≥2 punti history.
 
-        Reset history per isolation (test parallel-safe non garantito ma
-        suite seriale unittest)."""
-        _kw._HISTORY_MRR.clear()
+        sess.1539 round 3: clear ALL 3 history deque per isolazione completa
+        (review feedback: prima clear solo _HISTORY_MRR → flaky se altri test
+        avevano popolato _HISTORY_OUTSTAND/_HISTORY_PIPELINE)."""
+        for h in (_kw._HISTORY_MRR, _kw._HISTORY_OUTSTAND, _kw._HISTORY_PIPELINE):
+            h.clear()
         for v in (3000, 3200, 3500, 3800, 4124):
             _kw._HISTORY_MRR.append(v)
         payload = _kw.kpi_for_titlebar({'mrr': 4124})
         self.assertGreaterEqual(len(payload['spark_mrr']), 2,
                                 f"sparkline troppo corto: {payload['spark_mrr']!r}")
+        # History pulita → sparkline OUT/PIPE vuote per garanzia
+        self.assertEqual(payload['spark_out'],  '')
+        self.assertEqual(payload['spark_pipe'], '')
 
     def test_kpi_for_titlebar_nan_safe(self):
         """sess.1539 round 2: NaN/inf nel YAML non crashano il payload."""
@@ -599,6 +677,16 @@ class TestKpiWidget(unittest.TestCase):
         self.assertEqual(payload['outstanding'], 0.0)
         self.assertEqual(payload['leads'], 12.5)
         self.assertEqual(payload['cold_avg'], 0.0)
+
+    def test_kpi_for_titlebar_non_dict_input_safe(self):
+        """sess.1539 round 3: input non-dict (list/int/str/None) → {}.
+
+        Hardening contro YAML parser malformato che torna list/scalar.
+        Senza guard isinstance(dict) il main loop crasha ogni tick.
+        """
+        for bad_input in ([1, 2, 3], "string", 42, None, 0, "", []):
+            with self.subTest(bad=repr(bad_input)):
+                self.assertEqual(_kw.kpi_for_titlebar(bad_input), {})
 
 
 # ─────────────────────────────────────────────────────────────────────────────

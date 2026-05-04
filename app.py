@@ -1292,7 +1292,7 @@ class M5Watcher(App):
     }}
     #tab-area {{
         height: 1fr;
-        min-height: 20;
+        min-height: 30;
     }}
     TabbedContent {{
         background: {BG};
@@ -1596,7 +1596,7 @@ class M5Watcher(App):
         self._center_tabs()
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
-        fullscreen_tabs = {"tab-graph", "tab-logs", "tab-sent", "tab-procs", "tab-tent"}
+        fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent"}
         hide = event.pane is not None and event.pane.id in fullscreen_tabs
         self.query_one("#top-row").display = not hide
 

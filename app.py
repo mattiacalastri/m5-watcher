@@ -24,6 +24,7 @@ Tabs:
   🕸 Graph       — Vault Intelligence Panel (Neural Density · Data Attractors · Topologia)
   📊 KPI         — Business vitals (MRR · Outstanding · Pipeline · Setter)
   📋 Logs        — Cross-system activity stream (leads · payments · calls · voice · security)
+  🛡 Sentinel    — Cyber Sentinel live status (Canary watchpoints · Honeypot alerts)
 
 Keybindings: q quit · r refresh · p pause · 1-7 tab switch · f cycle graph filter
 Zoom: bottom-right + / − buttons (delegate Cmd+/− to Ghostty)
@@ -45,10 +46,11 @@ __license__      = "Proprietary © 2026 Astra Digital Marketing — All Rights R
 __copyright__    = "© 2026 Mattia Calastri · Astra Digital Marketing"
 __status__       = "Production"
 __pillar__       = "Astra OS · Polpo Cockpit Suite"
-__forged_in__    = "sess.1472"   # Activity Stream tab — cross-system log cascade
+__forged_in__    = "sess.1488"   # Sentinel tab — Cyber Sentinel canary + alerts live view
 __credits__      = ("Polpo Design System", "Textual", "psutil", "Apple Silicon M5 Max")
 
 import asyncio
+import functools
 import json
 import math
 import os
@@ -738,8 +740,9 @@ def render_feed(feed: deque) -> str:
 RAINBOW_SAT     = 0.55   # 0=grey, 1=neon. 0.55 = leggero/pastel
 RAINBOW_VAL     = 1.00   # luminosità piena di base
 RAINBOW_SPREAD  = 0.07   # offset di hue tra una lettera e la successiva
-RAINBOW_SPEED   = 0.008  # incremento di phase per tick → 12.5s ciclo a 10fps
-RAINBOW_FPS_DT  = 0.10   # 100ms tick = 10fps (dentro polpo.tokens fps_target)
+RAINBOW_SPEED   = 0.020  # incremento di phase per tick → ~12.5s ciclo a 4fps
+RAINBOW_FPS_DT  = 0.25   # 250ms tick = 4fps (sess.1494 fix CPU runaway: era 0.10/10fps → 100% core)
+RAINBOW_PHASE_Q = 3      # quantizza phase a 3 decimali → cache hit su _rainbow_hex
 
 # Wave modulation — onda di luce che scorre lungo il titolo
 WAVE_AMP        = 0.45   # ampiezza dim oscillation (0=no wave, 1=max dim a metà ciclo)
@@ -755,12 +758,16 @@ _ASCII_POLPO = (
     " ╚═╝      ╚═════╝ ╚══════╝╚═╝      ╚═════╝ ",
 )
 
+@functools.lru_cache(maxsize=16384)
 def _rainbow_hex(idx: int, phase: float, wave: bool = True) -> str:
     """HSV rainbow + optional wave luminosity modulation per letter.
 
     Hue cambia spazialmente (idx) + temporalmente (phase) → flusso arcobaleno.
     Quando wave=True, V (luminosità) oscilla con sin(2π·(idx·WAVE_FREQ - phase·WAVE_SPEED))
     creando un'onda di luce che scorre lungo il testo.
+
+    sess.1494: lru_cache su (idx, phase_quantized, wave) — phase arriva già
+    quantizzato dal watcher → hit ratio ~99% dopo warmup (1 ciclo = ~125 chiavi).
     """
     h = (idx * RAINBOW_SPREAD + phase) % 1.0
     if wave:
@@ -898,6 +905,90 @@ def _claude_session_number() -> str:
     return "—"
 
 
+def _read_sentinel_data() -> dict:
+    """Legge canary_state.json + ultimi 30 eventi da security_audit.jsonl."""
+    home = Path.home()
+    canary_path = home / ".claude/canary_state.json"
+    audit_path  = home / ".claude/security_audit.jsonl"
+
+    canaries: dict = {}
+    try:
+        data = json.loads(canary_path.read_text())
+        canaries = data.get("canaries", {})
+    except Exception:
+        pass
+
+    alerts: list[dict] = []
+    try:
+        lines = audit_path.read_text().splitlines()
+        for line in reversed(lines[-60:]):
+            try:
+                alerts.append(json.loads(line))
+            except Exception:
+                pass
+            if len(alerts) >= 30:
+                break
+    except Exception:
+        pass
+
+    return {"canaries": canaries, "alerts": alerts}
+
+
+def render_sentinel(data: dict) -> tuple[str, str]:
+    """Renders (canary_box, alerts_box) as Rich markup strings."""
+    canaries = data.get("canaries", {})
+    alerts   = data.get("alerts", [])
+
+    # ── Canary box ───────────────────────────────────────────────────────────
+    now = time.time()
+    lines = [
+        f"[bold {HOT_PINK}]🛡 CANARY STATUS[/]  [{DIM}]· immune layer 3[/]\n"
+        f"[italic {DIM}]Honeypot files — any atime/hash change = intrusion signal.[/]\n",
+    ]
+    canary_order = ["file_honeypot", "backup_tokens", "old_stripe", "admin_keys", "polpo_core"]
+    for key in canary_order:
+        c = canaries.get(key)
+        if not c:
+            lines.append(f"  [{DIM}]{'─'*36}[/]")
+            lines.append(f"  [{DIM}]{key:20s}[/]  [{ORANGE}]NOT DEPLOYED[/]")
+            continue
+        path_short = Path(c.get("path", "")).name
+        deployed_ago = now - (c.get("initial_atime", now))
+        age_h = deployed_ago / 3600
+        age_str = f"{age_h:.1f}h ago" if age_h < 24 else f"{deployed_ago/86400:.1f}d ago"
+        lines.append(f"  [{DIM}]{'─'*36}[/]")
+        lines.append(
+            f"  [{ELEC_BLUE}]{key:20s}[/]  [{LIME}]CLEAN[/]  [{DIM}]{path_short} · checked {age_str}[/]"
+        )
+    canary_str = "\n".join(lines)
+
+    # ── Alerts box ───────────────────────────────────────────────────────────
+    level_color = {0: LIME, 1: LIME, 2: ELEC_BLUE, 3: ORANGE, 4: ORANGE,
+                   5: HOT_PINK, 6: HOT_PINK, 7: HOT_PINK, 8: HOT_PINK,
+                   9: HOT_PINK, 10: WHITE}
+    alines = [
+        f"[bold {HOT_PINK}]🚨 RECENT ALERTS[/]  [{DIM}]· security_audit.jsonl (last 30)[/]\n"
+        f"[italic {DIM}]Injection · rate-limit · canary trips — immune system event stream.[/]\n",
+    ]
+    if not alerts:
+        alines.append(f"  [{LIME}]No recent alerts — clean.[/]")
+    for ev in alerts:
+        ts_raw = ev.get("ts", "")
+        ts = ts_raw[11:19] if len(ts_raw) >= 19 else ts_raw[:19]
+        tl = ev.get("threat_level", 0)
+        col = level_color.get(tl, DIM)
+        atype = ev.get("alert_type", "?")[:14]
+        desc  = ev.get("desc", "")[:62]
+        tool  = ev.get("tool", "")[:18]
+        alines.append(
+            f"  [{DIM}]{ts}[/] [{col}]L{tl}[/] [{DIM}]{atype:14s}[/] [{col}]{desc}[/]\n"
+            f"  [{DIM}]{'':>9}  tool:{tool}[/]"
+        )
+    alert_str = "\n".join(alines)
+
+    return canary_str, alert_str
+
+
 class TitleBar(Static):
     """Fascia titolo centrata a 5 righe:
     riga 1: emoji + titolo rainbow ad onda (centrato)
@@ -932,7 +1023,8 @@ class TitleBar(Static):
         self._repaint()
 
     def _tick(self) -> None:
-        self.phase = (self.phase + RAINBOW_SPEED) % 1.0
+        # sess.1494: quantizza phase → reactive watch dedup + lru_cache hit
+        self.phase = round((self.phase + RAINBOW_SPEED) % 1.0, RAINBOW_PHASE_Q)
 
     def watch_phase(self, _new: float) -> None:
         self._repaint()
@@ -1293,6 +1385,23 @@ class M5Watcher(App):
         padding: 1 3;
         height: 1fr;
     }}
+    #sentinel-row {{
+        height: 1fr;
+    }}
+    #canary-panel {{
+        background: {BG_ALT};
+        border: heavy {HOT_PINK};
+        padding: 1 2;
+        width: 1fr;
+        height: 1fr;
+    }}
+    #alerts-panel {{
+        background: {BG_ALT};
+        border: heavy {ELEC_BLUE};
+        padding: 1 2;
+        width: 2fr;
+        height: 1fr;
+    }}
     #logs-header {{
         padding: 0 0 1 0;
     }}
@@ -1334,6 +1443,7 @@ class M5Watcher(App):
         Binding("5",   "show_tab_graph", "Graph",     show=False),
         Binding("6",   "show_tab_kpi",   "KPI",       show=False),
         Binding("7",   "show_tab_logs",  "Logs",      show=False),
+        Binding("8",   "show_tab_sent",  "Sentinel",  show=False),
         Binding("f",   "cycle_graph_filter", "Filter",  show=False),
         Binding("c",   "triage",             "Triage",  show=True),
         Binding("k",   "kill_tent_selected", "🗑 Kill",  show=False),
@@ -1369,6 +1479,7 @@ class M5Watcher(App):
         self._prev_voice_state: str                    = ''
         self._prev_mrr:         float                  = 0.0
         self._prev_pipeline:    float                  = 0.0
+        self._sentinel_data:    dict                   = {}
         # Responsive layout — updated on terminal resize
         self._cols: int = 120
         self._rows: int = 40
@@ -1414,6 +1525,12 @@ class M5Watcher(App):
                         f"[italic {DIM}]Every signal from every tentacolo — leads, payments, calls, voice, security.[/]",
                         id="logs-header")
                     yield DataTable(id="log-table", cursor_type="row", zebra_stripes=True)
+            with TabPane("🛡 Sentinel", id="tab-sent"):
+                with Horizontal(id="sentinel-row"):
+                    with ScrollableContainer(id="canary-panel"):
+                        yield Static("", id="canary-static")
+                    with ScrollableContainer(id="alerts-panel"):
+                        yield Static("", id="alerts-static")
         with Horizontal(id="top-row"):
             with ScrollableContainer(id="cpu-panel"):
                 yield Static(
@@ -1472,7 +1589,7 @@ class M5Watcher(App):
         self._center_tabs()
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
-        fullscreen_tabs = {"tab-graph", "tab-logs"}
+        fullscreen_tabs = {"tab-graph", "tab-logs", "tab-sent"}
         hide = event.pane is not None and event.pane.id in fullscreen_tabs
         self.query_one("#top-row").display = not hide
 
@@ -1562,7 +1679,8 @@ class M5Watcher(App):
         if self._paused:
             return
         (self._mem, self._bat, self._proc_counts, self._graph_data,
-         self._kpi_data, self._focus_data, self._log_entries) = await asyncio.gather(
+         self._kpi_data, self._focus_data, self._log_entries,
+         self._sentinel_data) = await asyncio.gather(
             asyncio.to_thread(ds.unified_memory),
             asyncio.to_thread(ds.battery),
             asyncio.to_thread(_count_claude_mcp),
@@ -1570,6 +1688,7 @@ class M5Watcher(App):
             asyncio.to_thread(kpi_widget.read_kpi_data),
             asyncio.to_thread(ds.current_focus),
             asyncio.to_thread(ds.log_feed),
+            asyncio.to_thread(_read_sentinel_data),
         )
         self._mem_history.append(self._mem.get('pct', 0))
 
@@ -1650,6 +1769,15 @@ class M5Watcher(App):
             kpi_widget.render_kpi(self._kpi_data)
         )
         self._render_logs(self._log_entries)
+        self._render_sentinel(self._sentinel_data)
+
+    def _render_sentinel(self, data: dict) -> None:
+        canary_str, alert_str = render_sentinel(data)
+        try:
+            self.query_one("#canary-static", Static).update(canary_str)
+            self.query_one("#alerts-static", Static).update(alert_str)
+        except Exception:
+            pass
 
     def _render_logs(self, entries: list) -> None:
         lt = self.query_one("#log-table", DataTable)
@@ -1825,6 +1953,12 @@ class M5Watcher(App):
         self.query_one(TabbedContent).active = "tab-logs"
         lt = self.query_one("#log-table", DataTable)
         self.notify(f"📋  Activity Stream  ·  {lt.row_count} events", timeout=1.5)
+
+    def action_show_tab_sent(self) -> None:
+        self.query_one(TabbedContent).active = "tab-sent"
+        n_alerts = len(self._sentinel_data.get("alerts", []))
+        n_canaries = len(self._sentinel_data.get("canaries", {}))
+        self.notify(f"🛡  Sentinel  ·  {n_canaries} canary  ·  {n_alerts} alerts", timeout=1.5)
 
     def action_triage(self) -> None:
         self.push_screen(TriageScreen())

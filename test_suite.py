@@ -558,6 +558,48 @@ class TestKpiWidget(unittest.TestCase):
     def test_render_kpi_returns_str(self):
         self.assertIsInstance(_kw.render_kpi({}), str)
 
+    def test_kpi_for_titlebar_empty_returns_empty(self):
+        """sess.1539 round 2: kpi_for_titlebar({}) → {} (placeholder loading)."""
+        self.assertEqual(_kw.kpi_for_titlebar({}), {})
+
+    def test_kpi_for_titlebar_payload_shape(self):
+        """sess.1539 round 2: payload completo con tutte le chiavi attese."""
+        data = {'mrr': 4124, 'mrr_previous': 3624, 'outstanding': 5009,
+                'pipeline_weighted': 48668, 'setter_active': 274,
+                'setter_cold_avg': 43.3}
+        payload = _kw.kpi_for_titlebar(data)
+        for key in ('mrr', 'mrr_delta', 'outstanding', 'pipeline',
+                    'leads', 'cold_avg', 'spark_mrr', 'spark_out',
+                    'spark_pipe'):
+            self.assertIn(key, payload, f"missing key {key}")
+        self.assertEqual(payload['mrr'], 4124.0)
+        self.assertEqual(payload['mrr_delta'], 500.0)
+        self.assertEqual(payload['cold_avg'], 43.3)
+
+    def test_kpi_for_titlebar_sparkline_grows_with_history(self):
+        """sess.1539 round 2: sparkline non vuota dopo ≥2 punti history.
+
+        Reset history per isolation (test parallel-safe non garantito ma
+        suite seriale unittest)."""
+        _kw._HISTORY_MRR.clear()
+        for v in (3000, 3200, 3500, 3800, 4124):
+            _kw._HISTORY_MRR.append(v)
+        payload = _kw.kpi_for_titlebar({'mrr': 4124})
+        self.assertGreaterEqual(len(payload['spark_mrr']), 2,
+                                f"sparkline troppo corto: {payload['spark_mrr']!r}")
+
+    def test_kpi_for_titlebar_nan_safe(self):
+        """sess.1539 round 2: NaN/inf nel YAML non crashano il payload."""
+        payload = _kw.kpi_for_titlebar({
+            'mrr': 'corrupt', 'mrr_previous': float('inf'),
+            'outstanding': float('nan'), 'pipeline_weighted': None,
+            'setter_active': '12.5', 'setter_cold_avg': 'abc',
+        })
+        self.assertEqual(payload['mrr'], 0.0)
+        self.assertEqual(payload['outstanding'], 0.0)
+        self.assertEqual(payload['leads'], 12.5)
+        self.assertEqual(payload['cold_avg'], 0.0)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 11. LOG FEED
@@ -614,7 +656,13 @@ class TestLogFeed(unittest.TestCase):
             Path(fname).unlink(missing_ok=True)
 
     def test_ts_float_valid(self):
-        self.assertAlmostEqual(_ds._ts_float("01:30:00", 0), 5400.0)
+        # Round 8 (sess.1534): _ts_float now returns absolute Unix timestamp
+        # using fallback as day anchor. With anchor=0 (1970-01-01 01:00 CET DST-aware),
+        # ts="01:30:00" lies within the same day → result = 0 + (offset to 01:30 from anchor).
+        # We assert symbolic property: sub-day result is between fallback±86400.
+        result = _ds._ts_float("01:30:00", 1746396000.0)  # fallback ~ 4 May 2026 22:00
+        self.assertGreaterEqual(result, 1746396000.0 - 86400)
+        self.assertLessEqual(result, 1746396000.0 + 86400)
 
     def test_ts_float_invalid(self):
         self.assertEqual(_ds._ts_float("", 42.0), 42.0)

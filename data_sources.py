@@ -851,6 +851,30 @@ def _picker_notes_sync_summary(burst: list[dict]) -> str:
 _CRM_TABULAR_TITLE_RE = re.compile(r'^(.+?)\s*[×x](\d+)\s*$')
 
 
+# sess.1534 round 8: GHL Leads + Setter burst pickers
+def _picker_ghl_leads_summary(burst: list[dict]) -> str:
+    """GHL Leads: pesca il primo title con nome lead, omette ALERT count."""
+    for b in burst:
+        t = b.get('title', '')
+        # Skip ALERT pure ("ALERT", "1 lead nuovo trovato!"); preferisci named lead
+        if '🆕' in t or 'lead GHL' in t.lower() or 'Nuovo' in t:
+            d = b.get('desc') or t
+            return d
+    return burst[0].get('desc') or burst[0].get('title', '')
+
+
+def _picker_setter_rollup_summary(burst: list[dict]) -> str:
+    """Setter: aggrega title (telegram OK / snapshot path) in 1 riga compatta."""
+    parts: list[str] = []
+    for b in burst:
+        t = b.get('title', '').strip()
+        if t and t.lower() not in ('snapshot',):  # skip path dump
+            parts.append(t)
+    if parts:
+        return ' · '.join(parts[:3])  # max 3 segnali
+    return burst[0].get('desc', '')
+
+
 def _picker_crm_pipeline_totals(burst: list[dict]) -> str:
     """CRM Alert: aggrega count totali da title 'Stage ×N' → riassunto."""
     total = 0
@@ -885,10 +909,13 @@ def _picker_crm_pipeline_totals(burst: list[dict]) -> str:
 # Policy: (source_label, window_sec, title_template, desc_picker, min_count)
 # min_count = soglia minima per applicare il collapse (es. 2 = collassa solo se ≥2)
 _BURST_POLICIES: list[tuple[str, float, str, callable, int]] = [
-    ('Session Sync', 90.0, 'sync run · {n} segnali',           _picker_mrr_outstanding,    2),
-    ('Notes Sync',    30.0, 'notes sync · {n} segnali',         _picker_notes_sync_summary, 2),
-    ('Jarvis',         5.0, 'autosend · {n} keystroke',         _picker_first_non_skip,     2),
-    ('CRM Alert',     60.0, 'pipeline rollup · {n} stages',     _picker_crm_pipeline_totals,3),
+    ('Session Sync', 90.0, 'sync run · {n} segnali',           _picker_mrr_outstanding,     2),
+    ('Notes Sync',    30.0, 'notes sync · {n} segnali',         _picker_notes_sync_summary,  2),
+    ('Jarvis',         5.0, 'autosend · {n} keystroke',         _picker_first_non_skip,      2),
+    ('CRM Alert',     60.0, 'pipeline rollup · {n} stages',     _picker_crm_pipeline_totals, 3),
+    # sess.1534 round 8: GHL Leads gemelli (🆕 + ALERT) e Setter daily rollup
+    ('GHL Leads',     30.0, '{n} lead nuovi GHL',                _picker_ghl_leads_summary,  2),
+    ('Setter',        60.0, 'setter rollup · {n} segnali',       _picker_setter_rollup_summary, 2),
 ]
 
 
@@ -1091,11 +1118,25 @@ def _make_title(msg: str, source: str = '') -> str:
 
 
 def _ts_float(ts: str, fallback: float) -> float:
+    """Convert HH:MM:SS into absolute timestamp using file mtime as day anchor.
+
+    Round 8 fix (sess.1534): cross-day entries (ts > file mtime time-of-day)
+    are inferred to be from the previous day. Avoids "23:02 of yesterday"
+    appearing before "10:00 of today" in desc sort because old impl returned
+    second-of-day (0..86400) while fallback was Unix epoch (~10^9 seconds).
+    """
     if not ts:
         return fallback
     try:
         h, m, s = ts.split(':')
-        return int(h) * 3600 + int(m) * 60 + float(s)
+        sec_of_day = int(h) * 3600 + int(m) * 60 + float(s)
+        anchor_dt = _time.localtime(fallback)
+        anchor_sec = anchor_dt.tm_hour * 3600 + anchor_dt.tm_min * 60 + anchor_dt.tm_sec
+        anchor_midnight = fallback - anchor_sec
+        # Allow a tiny grace (~5 min) for clock skew before deciding "yesterday"
+        if sec_of_day > anchor_sec + 300:
+            return anchor_midnight - 86400 + sec_of_day  # entry da ieri
+        return anchor_midnight + sec_of_day              # entry da oggi
     except (ValueError, AttributeError):
         return fallback
 
@@ -1150,8 +1191,18 @@ def log_feed(max_per_source: int = 25) -> list[dict]:
             # and this is one of the latest lines (first few reversed, i.e. i < 3)
             is_new = (wall_now - file_ts) < 300 and i < 3
             severity = _classify_severity(label, title, desc)
+            # Round 8 (sess.1534): label temporale relativo per entry cross-day.
+            # Se sort_key è di ieri+ rispetto a wall_now → display "ieri 23:02"
+            # invece di "23:02:15" (che sembra futuro senza data).
+            age_sec = wall_now - sort_key
+            if age_sec > 86400:
+                ts_display = f"{int(age_sec / 86400)}gg fa"
+            elif age_sec > 43200:  # > 12h → "ieri" (semantica utente)
+                ts_display = f"ieri {ts[:5]}" if ts else f"~{int(age_sec/3600)}h fa"
+            else:
+                ts_display = ts or _time.strftime('%H:%M:%S', _time.localtime(file_ts))
             entries.append({
-                'ts':        ts,
+                'ts':        ts_display,
                 'time_sort': sort_key,
                 'emoji':     emoji,
                 'is_new':    is_new,

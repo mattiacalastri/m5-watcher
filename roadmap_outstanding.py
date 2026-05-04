@@ -5,7 +5,7 @@ D+N aging dinamico per cliente, severity P0/P1/info adattiva, mismatch
 detection vs frontmatter (warn >€500). Cache TTL 60s, self-contained.
 
 Public API:
-    read_outstanding(force_refresh=False) -> list[dict]
+    read_outstanding(force_refresh=False) -> list[OutstandingEntry]
     render_outstanding_section(entries=None) -> str
     read_frontmatter_outstanding() -> int | None
 """
@@ -19,9 +19,13 @@ from roadmap_common import (
     RED, ORANGE, DIM,
     KPI_FILE,
     IT_MONTHS_SHORT as _IT_MONTHS,
-    today_date,
+    OutstandingEntry,
     cached,
     read_text,
+    severity_color,
+    severity_icon,
+    severity_rank,
+    today_date,
 )
 
 
@@ -42,6 +46,10 @@ def _calculate_days_from_emission(cliente: str, today: date) -> Optional[int]:
     Match keyword case-insensitive: la prima parola del nome cliente che
     matcha una chiave di EMISSION_DATES restituisce il delta giorni.
     Returns None se nessun match → caller fa fallback al regex parser.
+
+    Antifragile (sess.1534 round 10): se delta <0 (config bug — emission
+    futura) o >730 (record stantio) emette warn su stderr invece di
+    silent-None. Il fallback al regex parser resta lo stesso.
     """
     if not cliente:
         return None
@@ -51,6 +59,21 @@ def _calculate_days_from_emission(cliente: str, today: date) -> Optional[int]:
             delta = (today - emission_date).days
             if 0 <= delta <= 730:
                 return delta
+            # Out-of-range: emit warn cosi' il config bug non resta invisibile.
+            try:
+                import sys
+                if delta < 0:
+                    sys.stderr.write(
+                        f"WARN [outstanding]: emission_date out of range for "
+                        f"{cliente!r}: delta={delta} (config bug — emission in future)\n"
+                    )
+                else:  # delta > 730
+                    sys.stderr.write(
+                        f"WARN [outstanding]: emission_date stale for "
+                        f"{cliente!r}: delta={delta} (>730d, archive entry?)\n"
+                    )
+            except Exception:
+                pass
             return None
     return None
 
@@ -268,13 +291,13 @@ def _enrich_with_aging(
     rows: list[dict],
     outstanding_note: str,
     today: date,
-) -> list[dict]:
+) -> list[OutstandingEntry]:
     """Per ogni cliente, aggrega aging: emission_date hardcoded > regex tabella + nota frontmatter.
 
     Strategy: emission_date prevale (round 7 fix); altrimenti max delle due
     fonti regex (table_note + outstanding_note frontmatter). Severity classificata.
     """
-    enriched: list[dict] = []
+    enriched: list[OutstandingEntry] = []
     note_lower = outstanding_note.lower() if outstanding_note else ""
 
     for row in rows:
@@ -285,10 +308,10 @@ def _enrich_with_aging(
 
         # Round 7: emission_date prevale (se noto) sul regex
         if days_emission is not None:
-            days_aged = days_emission
+            days_aged: Optional[int] = days_emission
         else:
             days_a = _extract_days_aged(table_note, today)
-            days_b = None
+            days_b: Optional[int] = None
             first_word = re.split(r"[\s/(]", cliente)[0].lower().strip()
             if outstanding_note and first_word and len(first_word) >= 3:
                 for m in re.finditer(re.escape(first_word), note_lower):
@@ -317,7 +340,7 @@ def _enrich_with_aging(
 # ══════════════════════════════════════════════════════════════════════════════
 
 @cached(ttl=60.0)
-def read_outstanding() -> list[dict]:
+def read_outstanding() -> list[OutstandingEntry]:
     """Ritorna lista entries outstanding con aging + severity. Cached 60s."""
     text = read_text(KPI_FILE)
     if not text:
@@ -336,27 +359,16 @@ def read_frontmatter_outstanding() -> Optional[int]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Severity helpers + renderer
+# Renderer (severity helpers da roadmap_common — K2 Plan B)
 # ══════════════════════════════════════════════════════════════════════════════
-
-_SEV_ORDER = {"P0": 0, "P1": 1, "info": 2}
-_SEV_COLOR = {"P0": RED, "P1": ORANGE, "info": DIM}
-_SEV_ICON  = {"P0": "🔴", "P1": "🟡", "info": "·"}
-
-
-def _severity_color(sev: str) -> str:
-    return _SEV_COLOR.get(sev, DIM)
-
-
-def _severity_icon(sev: str) -> str:
-    return _SEV_ICON.get(sev, "·")
-
 
 def _format_days(days: Optional[int]) -> str:
     return f"D+{days}" if days is not None else "D+? (data ignota)"
 
 
-def render_outstanding_section(entries: list[dict] | None = None) -> str:
+def render_outstanding_section(
+    entries: list[OutstandingEntry] | None = None,
+) -> str:
     """Rich markup section, sorted by severity (P0 first) then days_aged desc.
 
     Header: count totale, somma €, count P0/P1.
@@ -371,7 +383,7 @@ def render_outstanding_section(entries: list[dict] | None = None) -> str:
     sorted_entries = sorted(
         entries,
         key=lambda e: (
-            _SEV_ORDER.get(e["severity"], 99),
+            severity_rank(e["severity"]),
             -(e["days_aged"] if e["days_aged"] is not None else -1),
         ),
     )
@@ -407,8 +419,8 @@ def render_outstanding_section(entries: list[dict] | None = None) -> str:
     lines = [header]
     for e in sorted_entries:
         sev = e["severity"]
-        color = _severity_color(sev)
-        icon  = _severity_icon(sev)
+        color = severity_color(sev)
+        icon  = severity_icon(sev)
         amt_str = f"{e['amount']:,}".replace(",", ".")
         days_str = _format_days(e["days_aged"])
         note = e["note"]

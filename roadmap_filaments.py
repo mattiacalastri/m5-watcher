@@ -8,7 +8,7 @@ session_current.md to flag stale entries, and emits a Rich-markup section.
 Self-contained: NO Textual import. Only stdlib.
 
 Public API:
-    read_filaments(force=False, path=None) -> list[dict]
+    read_filaments(force=False, path=None) -> list[FilamentDict]
     render_filaments_section(filaments=None) -> str
     parse_italian_date(text, today=None) -> date | None
     classify_severity(stato, deadline, today) -> tuple[str, int | None]
@@ -29,6 +29,8 @@ from roadmap_common import (
     ROADMAP_Q2 as ROADMAP_PATH,
     SESSION_CURRENT as SESSION_PATH,
     KPI_FILE as KPI_PATH,
+    FilamentDict,
+    severity_rank,
 )
 
 # Severity dot glyphs
@@ -534,7 +536,9 @@ def parse_filaments(content: str, today: Optional[date] = None) -> list[Filament
 # Public API
 # ---------------------------------------------------------------------------
 
-def read_filaments(force: bool = False, path: Optional[Path] = None) -> list[dict]:
+def read_filaments(
+    force: bool = False, path: Optional[Path] = None,
+) -> list[FilamentDict]:
     """Read & parse filaments from the roadmap. Cached 60s (mtime-aware)."""
     src = path or ROADMAP_PATH
     now = time.time()
@@ -570,9 +574,13 @@ def _short_stato(stato: str, max_len: int = 80) -> str:
     return s[: max_len - 1] + "…" if len(s) > max_len else s
 
 
-_SEV_DOT_COLOR = {
-    "P0":   (DOT_P0, RED),
-    "P1":   (DOT_P1, ORANGE),
+# Local override: filamenti usano "🟢" (alive) per info invece del "·" generico
+# in roadmap_common — la metafora è "filamento radici verde = vivo, vibrante".
+# La palette colore è centralizzata in roadmap_common.severity_color, ma per
+# i glifi dot-circle preserviamo qui la convenzione filamenti-specifica.
+_SEV_DOT_COLOR: dict[str, tuple[str, str]] = {
+    "P0":   (DOT_P0,   RED),
+    "P1":   (DOT_P1,   ORANGE),
     "info": (DOT_INFO, LIME),
 }
 
@@ -588,10 +596,9 @@ def _render_one_line(f: Filament) -> str:
     return f"[{color}]{dot} {f.name}[/] [{DIM}]·[/] {stato}{drift_tag}"
 
 
-_SEV_ORDER_RENDER = {"P0": 0, "P1": 1, "info": 2}
-
-
-def render_filaments_section(filaments: Optional[list[dict]] = None) -> str:
+def render_filaments_section(
+    filaments: Optional[list[FilamentDict]] = None,
+) -> str:
     """Render the FILAMENTI section as a Rich-markup block string.
 
     Integrates detect_session_drift to annotate stale entries with a green
@@ -604,10 +611,33 @@ def render_filaments_section(filaments: Optional[list[dict]] = None) -> str:
     if not filaments:
         return f"[bold {RED}]━━━ \U0001f331 FILAMENTI RADICI[/] [{DIM}]no roadmap found[/]"
 
+    drift_check_failed = False
+    drift_failure_label = ""
     try:
         drift_map = detect_session_drift(filaments)
-    except Exception:
+    except Exception as e:
         drift_map = {}
+        drift_check_failed = True
+        drift_failure_label = f"{type(e).__name__}"
+        # Antifragile (sess.1534 round 10): log to persistent file +
+        # stderr cosi' Mattia vede il fallimento invece di silent-recover.
+        try:
+            import sys
+            import time as _time
+            import traceback as _tb
+            log_dir = Path.home() / ".local/share/polpo"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "m5_render_errors.log"
+            ts = _time.strftime("%Y-%m-%d %H:%M:%S")
+            tb = _tb.format_exception_only(type(e), e)[0].strip()
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{ts}] filaments.drift-check: {tb}\n")
+            try:
+                sys.stderr.write(f"[m5.render_error] filaments.drift-check: {tb}\n")
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     objs: list[Filament] = []
     for d in filaments:
@@ -641,20 +671,25 @@ def render_filaments_section(filaments: Optional[list[dict]] = None) -> str:
         if drift_map.get(o.name, {}).get("status") == "roadmap_stale"
     )
 
-    # Sort: P0 first, then P1 (drift first within P1), then info; stale last
+    # Sort: P0 first, then P1 (drift first within P1), then info; stale last.
+    # severity_rank() centralizzato in roadmap_common (K2 Plan B).
     def _sort_key(o: Filament) -> tuple:
         is_stale = drift_map.get(o.name, {}).get("status") == "roadmap_stale"
         return (
             int(is_stale),
-            _SEV_ORDER_RENDER.get(o.severity, 9),
+            severity_rank(o.severity),
             -(o.days_drift or 0),
         )
     objs.sort(key=_sort_key)
 
     stale_tag = f" · {stale_resolved} stale-resolved ✓" if stale_resolved else ""
+    drift_fail_tag = (
+        f" · [bold #ff3366]drift-check FAILED ⚠ {drift_failure_label}[/]"
+        if drift_check_failed else ""
+    )
     header = (
         f"[bold {RED}]━━━ \U0001f331 FILAMENTI RADICI "
-        f"({total} · {p0} fired · {drifted} drift · {silent} silenti{stale_tag}) "
+        f"({total} · {p0} fired · {drifted} drift · {silent} silenti{stale_tag}{drift_fail_tag}) "
         f"━━━━━━━━━━━━[/]"
     )
     lines = [header]

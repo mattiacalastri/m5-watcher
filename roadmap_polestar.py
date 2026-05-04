@@ -21,7 +21,7 @@ from pathlib import Path
 from roadmap_common import (
     RED, ORANGE, LIME, DIM, TEAL,
     KPI_FILE, ROADMAP_Q2, ROADMAP_CAL,
-    MONTH_LOOKUP, cached, parse_frontmatter, read_text,
+    MONTH_LOOKUP, PhaseState, cached, parse_frontmatter, read_text,
 )
 
 # Costanti fase RADICI (target di prodotto, non drift-prone)
@@ -117,7 +117,7 @@ def _parse_kill_date(path: Path) -> date:
 # ---------------------------------------------------------------------------
 
 @cached(ttl=60.0)
-def read_phase_state() -> dict:  # noqa: D401 — public API
+def read_phase_state() -> PhaseState:  # noqa: D401 — public API
     return _read_phase_state_impl()
 
 
@@ -126,7 +126,7 @@ def read_phase_state() -> dict:  # noqa: D401 — public API
 _CACHE = read_phase_state._cache_state  # type: ignore[attr-defined]
 
 
-def _read_phase_state_impl() -> dict:
+def _read_phase_state_impl() -> PhaseState:
     """Restituisce lo stato corrente fase RADICI + kill check.
 
     Keys: mrr, mrr_target, outstanding, outstanding_target, contracts_signed,

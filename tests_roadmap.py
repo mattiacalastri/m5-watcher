@@ -1152,5 +1152,289 @@ class TestRound9Patches(unittest.TestCase):
                         del sys.modules[m]
 
 
+class TestAntifragility(unittest.TestCase):
+    """Sess.1534 round 10 — silent failure → antifragile logged failure."""
+
+    def setUp(self):
+        # Path log (~/.local/share/polpo/m5_render_errors.log) viene scritto
+        # da _log_render_error. Annotiamo dimensione iniziale per asserire growth.
+        self._log_path = Path.home() / ".local/share/polpo" / "m5_render_errors.log"
+        self._initial_size = (
+            self._log_path.stat().st_size if self._log_path.exists() else 0
+        )
+
+    def test_safe_render_logs_error_on_exception(self):
+        """_safe_render_outstanding logga su file persistente quando il render esplode."""
+        import app
+        # Inietta un modulo finto che esplode al render
+        class _Boom:
+            def render_outstanding_section(self):
+                raise RuntimeError("synthetic boom for test")
+        app._ROADMAP_MODULES_CACHE["roadmap_outstanding"] = _Boom()
+        try:
+            out = app._safe_render_outstanding()
+            self.assertIn("outstanding", out.lower())
+            # Log file deve esistere e essere cresciuto
+            self.assertTrue(self._log_path.exists(),
+                            "m5_render_errors.log non creato")
+            new_size = self._log_path.stat().st_size
+            self.assertGreater(new_size, self._initial_size,
+                               "log non e' cresciuto dopo render failure")
+            # Verifica contenuto: ultima riga contiene 'outstanding' e 'RuntimeError'
+            with open(self._log_path, "r", encoding="utf-8") as f:
+                tail = f.read()[-500:]
+            self.assertIn("outstanding", tail)
+            self.assertIn("RuntimeError", tail)
+        finally:
+            # Pulizia: rimuovi cache injection
+            app._ROADMAP_MODULES_CACHE.pop("roadmap_outstanding", None)
+
+    def test_safe_render_returns_visible_badge(self):
+        """Quando il render fallisce, il caller riceve un badge rosso visibile, non ''."""
+        import app
+        class _Boom:
+            def render_polestar_strip(self):
+                raise ValueError("forced failure")
+        app._ROADMAP_MODULES_CACHE["roadmap_polestar"] = _Boom()
+        try:
+            out = app._safe_render_polestar()
+            # Non deve essere stringa vuota
+            self.assertNotEqual(out, "")
+            # Deve contenere il colore rosso del badge antifragile
+            self.assertIn("#ff3366", out)
+            # Deve nominare il tipo eccezione (segnale dx)
+            self.assertIn("ValueError", out)
+        finally:
+            app._ROADMAP_MODULES_CACHE.pop("roadmap_polestar", None)
+
+    def test_detect_active_traps_failure_becomes_trap(self):
+        """Detector che esplode → trap DETECTOR_FAILED P1 invece di silent-skip."""
+        import roadmap_traps
+
+        def _exploding_detector():
+            raise RuntimeError("synthetic detector explosion")
+
+        original_funcs = roadmap_traps._TRAP_FUNCS
+        # Reset cache state completamente
+        cache = roadmap_traps.detect_active_traps._cache_state  # type: ignore[attr-defined]
+        prev_ts, prev_data = cache["ts"], cache["data"]
+        try:
+            roadmap_traps._TRAP_FUNCS = (_exploding_detector,)
+            traps = roadmap_traps.detect_active_traps(force=True)
+            failed_traps = [t for t in traps if t.get("trap") == "DETECTOR_FAILED"]
+            self.assertEqual(len(failed_traps), 1,
+                             "detector failure deve produrre 1 DETECTOR_FAILED trap")
+            self.assertEqual(failed_traps[0]["severity"], "P1")
+            self.assertIn("RuntimeError", failed_traps[0]["evidence"])
+            self.assertIn("_exploding_detector", failed_traps[0]["evidence"])
+        finally:
+            roadmap_traps._TRAP_FUNCS = original_funcs
+            cache["ts"] = prev_ts
+            cache["data"] = prev_data
+
+    def test_extract_session_mrr_returns_sentinel_on_double_failure(self):
+        """MRR mentioned ma parse fallisce in entrambi (FM + body) → sentinel -1."""
+        from roadmap_traps import _extract_session_mrr
+        # FM ha mrr: ma con valore non parseable; body cita MRR ma con valore non parseable
+        text = (
+            "---\n"
+            "mrr: NOT_A_NUMBER\n"
+            "---\n"
+            "MRR: TBD-figure-out-later\n"
+        )
+        result = _extract_session_mrr(text)
+        self.assertEqual(result, -1,
+                         "Double parse failure deve ritornare -1 sentinel, non None")
+
+        # Sanity check: text completamente senza MRR → None (no parse_attempted)
+        text_no_mrr = "---\nupdated: 2026-05-04\n---\nNothing about revenue here.\n"
+        self.assertIsNone(_extract_session_mrr(text_no_mrr),
+                          "Senza menzioni MRR deve restare None (compat)")
+
+    def test_filaments_drift_check_failure_surfaces_in_header(self):
+        """Round 10: drift_check failure rende un badge nell'header, non silent-recover."""
+        import roadmap_filaments
+        # Patch detect_session_drift per esplodere
+        original = roadmap_filaments.detect_session_drift
+        try:
+            def _boom(_filaments):
+                raise RuntimeError("drift check exploded")
+            roadmap_filaments.detect_session_drift = _boom
+            fake_filaments = [{
+                "name": "test_filament",
+                "stato": "ok",
+                "severity": "info",
+                "segnale_vita": "",
+                "segnale_morte": "",
+            }]
+            output = roadmap_filaments.render_filaments_section(fake_filaments)
+            self.assertIn("drift-check FAILED", output,
+                          "header deve esibire 'drift-check FAILED' quando detector esplode")
+            self.assertIn("RuntimeError", output)
+        finally:
+            roadmap_filaments.detect_session_drift = original
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# K2 Plan B (sess.1534) — Severity Literal + TypedDict consolidation contract
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestTypeContracts(unittest.TestCase):
+    """Severity Literal + TypedDict shape contract cross-modulo.
+
+    K2 Plan B: tutte le severity dei moduli consumer devono appartenere a
+    SEVERITY_VALUES centralizzato; tutte le entry shape hanno chiavi TypedDict.
+    """
+
+    def test_severity_literal_values_in_palette(self):
+        """SEVERITY_VALUES contiene esattamente i 6 valori canonici."""
+        from roadmap_common import SEVERITY_VALUES, severity_color, severity_icon
+        expected = {"P0", "P1", "P2", "info", "info-lime", "noise"}
+        self.assertEqual(SEVERITY_VALUES, expected)
+        # Tutte le severity devono produrre color + icon validi (no defaults)
+        for sev in SEVERITY_VALUES:
+            color = severity_color(sev)
+            self.assertRegex(color, r"^#[0-9a-fA-F]{6}$",
+                             f"severity_color({sev!r}) deve essere hex")
+            icon = severity_icon(sev)
+            self.assertIsInstance(icon, str)
+            self.assertGreater(len(icon), 0, f"severity_icon({sev!r}) vuoto")
+
+    def test_severity_rank_ordering(self):
+        """severity_rank: P0 < P1=P2 < info=info-lime < noise; unknown → 99."""
+        from roadmap_common import severity_rank
+        self.assertEqual(severity_rank("P0"), 0)
+        self.assertEqual(severity_rank("P1"), 1)
+        self.assertEqual(severity_rank("P2"), 1)
+        self.assertEqual(severity_rank("info"), 2)
+        self.assertEqual(severity_rank("info-lime"), 2)
+        self.assertEqual(severity_rank("noise"), 3)
+        self.assertEqual(severity_rank("xyz"), 99,
+                         "unknown severity → 99 (sort fondo lista ascending)")
+        # Sortable contract
+        sevs = ["info", "P0", "noise", "P1", "info-lime", "P2"]
+        sorted_sevs = sorted(sevs, key=severity_rank)
+        self.assertEqual(sorted_sevs[0], "P0")
+        self.assertEqual(sorted_sevs[-1], "noise")
+
+    def test_outstanding_entry_schema(self):
+        """read_outstanding ritorna entry TypedDict-valid (chiavi obbligatorie)."""
+        from roadmap_common import SEVERITY_VALUES
+        from roadmap_outstanding import read_outstanding
+        entries = read_outstanding(force_refresh=True)
+        if not entries:
+            self.skipTest("No outstanding entries (vault offline?)")
+
+        required_keys = {"cliente", "amount", "days_aged", "severity",
+                         "note", "next_action"}
+        for e in entries:
+            self.assertEqual(
+                set(e.keys()), required_keys,
+                f"OutstandingEntry shape mismatch: keys={set(e.keys())}",
+            )
+            self.assertIsInstance(e["cliente"], str)
+            self.assertIsInstance(e["amount"], int)
+            self.assertIn(e["severity"], SEVERITY_VALUES,
+                          f"severity {e['severity']!r} not in palette")
+
+    def test_block_entry_schema(self):
+        """read_blocks ritorna entry con chiavi BlockEntry."""
+        from roadmap_common import SEVERITY_VALUES
+        from roadmap_blocks import read_blocks
+        blocks = read_blocks()
+        if not blocks:
+            self.skipTest("No blocks (vault offline?)")
+
+        # Chiavi minime obbligatorie (le altre sono total=False)
+        required_keys = {"name", "da_quanto_raw", "da_quanto_days",
+                         "energia_bloccata", "sblocco", "owner",
+                         "severity", "deadline"}
+        for b in blocks:
+            self.assertTrue(
+                required_keys.issubset(b.keys()),
+                f"BlockEntry shape mismatch: missing {required_keys - set(b.keys())}",
+            )
+            self.assertIn(b["severity"], SEVERITY_VALUES,
+                          f"severity {b['severity']!r} not in palette")
+
+    def test_filament_entry_schema(self):
+        """read_filaments ritorna entry con chiavi FilamentDict."""
+        from roadmap_common import SEVERITY_VALUES
+        from roadmap_filaments import read_filaments
+        items = read_filaments(force=True)
+        if not items:
+            self.skipTest("No filaments (vault offline?)")
+
+        required_keys = {"name", "severity", "stato", "segnale_vita",
+                         "segnale_morte", "days_drift", "deadline"}
+        for f in items:
+            self.assertEqual(
+                set(f.keys()), required_keys,
+                f"FilamentDict shape mismatch: keys={set(f.keys())}",
+            )
+            self.assertIn(f["severity"], SEVERITY_VALUES)
+
+    def test_trap_alert_schema(self):
+        """detect_active_traps ritorna alert TypedDict-valid."""
+        from roadmap_common import SEVERITY_VALUES
+        from roadmap_traps import detect_active_traps
+        traps = detect_active_traps()
+        if not traps:
+            self.skipTest("No active traps")
+
+        required_keys = {"trap", "evidence", "severity",
+                         "mitigation", "cicatrice_ref"}
+        for t in traps:
+            self.assertEqual(
+                set(t.keys()), required_keys,
+                f"TrapAlert shape mismatch: keys={set(t.keys())}",
+            )
+            self.assertIn(t["severity"], SEVERITY_VALUES)
+
+    def test_phase_state_schema(self):
+        """read_phase_state ritorna PhaseState con chiavi attese."""
+        from roadmap_polestar import read_phase_state
+        state = read_phase_state()
+        self.assertIsInstance(state, dict)
+        # PhaseState è total=False — tutte le chiavi opzionali ma queste sono
+        # sempre popolate dall'impl corrente (cfr. _read_phase_state_impl)
+        expected_keys = {"mrr", "mrr_target", "outstanding", "outstanding_target",
+                         "contracts_signed", "aurahome_status", "conditions_met",
+                         "kill_days_remaining", "kill_date_str",
+                         "kill_target", "kill_clients_paid"}
+        self.assertTrue(
+            expected_keys.issubset(state.keys()),
+            f"PhaseState missing: {expected_keys - set(state.keys())}",
+        )
+
+    def test_no_severity_drift_cross_module(self):
+        """I moduli usano la stessa palette di severity di roadmap_common.
+
+        Test paranoia: verifica che ogni severity emessa dai 4 produttori
+        (outstanding, blocks, filaments, traps) appartenga a SEVERITY_VALUES.
+        Previene drift se un developer aggiunge "warning" in un modulo senza
+        registrarlo in common.
+        """
+        from roadmap_common import SEVERITY_VALUES
+        from roadmap_outstanding import read_outstanding
+        from roadmap_blocks import read_blocks
+        from roadmap_filaments import read_filaments
+        from roadmap_traps import detect_active_traps
+
+        producers = (
+            ("outstanding", read_outstanding(force_refresh=True)),
+            ("blocks",      read_blocks()),
+            ("filaments",   read_filaments(force=True)),
+            ("traps",       detect_active_traps()),
+        )
+        for name, items in producers:
+            for it in items:
+                sev = it.get("severity")
+                self.assertIn(
+                    sev, SEVERITY_VALUES,
+                    f"{name}: severity {sev!r} drift — non in palette common",
+                )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

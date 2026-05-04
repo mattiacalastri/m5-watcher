@@ -25,6 +25,7 @@ from pathlib import Path
 from roadmap_common import (
     RED, ORANGE, DIM,
     SESSION_CURRENT, KPI_FILE,
+    TrapAlert,
     cached,
     parse_frontmatter as _common_parse_frontmatter,
     parse_int_eur as _common_parse_int,
@@ -107,7 +108,7 @@ def _run_parallel(jobs: list[tuple]) -> list[str]:
 # TRAP 1 — Sì blanket multi-azione
 # ---------------------------------------------------------------------------
 
-def _check_trap1_si_blanket() -> dict | None:
+def _check_trap1_si_blanket() -> TrapAlert | None:
     valid_repos = [r for r in TRACKED_REPOS if (r / ".git").exists()]
     jobs = [
         (["git", "log", "--since=24 hours ago", "--oneline"], repo)
@@ -148,7 +149,7 @@ def _check_trap1_si_blanket() -> dict | None:
 # TRAP 2 — Build-and-abandon
 # ---------------------------------------------------------------------------
 
-def _check_trap2_build_abandon() -> dict | None:
+def _check_trap2_build_abandon() -> TrapAlert | None:
     if not PROJECTS_DIR.exists():
         return None
 
@@ -266,19 +267,33 @@ def _extract_session_mrr(text: str) -> int | None:
 
     Round 7 fix: prefer frontmatter — body può citare MRR storici nella
     narrativa causando falsi positivi su Trap 3 (drift Δ=500 vs ground truth).
+
+    Round 10 antifragile (sess.1534): ritorna sentinel `-1` quando ENTRAMBI
+    frontmatter+body parsing falliscono pur essendoci stato un match — Trap 3
+    distingue cosi' "MRR_UNPARSEABLE" (config bug) da "no MRR mentioned"
+    (None). Caller in `_check_trap3_memory_drift` consuma -1 per emettere
+    un trap dedicato MRR_UNPARSEABLE invece di drift drift silenziato.
     """
+    parse_attempted = False
+
     fm = _parse_frontmatter(text)
     if "mrr" in fm:
+        parse_attempted = True
         parsed = _parse_int(fm["mrr"])
         if parsed is not None:
             return parsed
     m = re.search(r"MRR[:\s€]*([0-9][0-9.,]*)", text, re.IGNORECASE)
     if m:
-        return _parse_int(m.group(1))
+        parse_attempted = True
+        parsed = _parse_int(m.group(1))
+        if parsed is not None:
+            return parsed
+    if parse_attempted:
+        return -1  # sentinel: MRR mentioned but parsing failed
     return None
 
 
-def _check_trap3_memory_drift() -> dict | None:
+def _check_trap3_memory_drift() -> TrapAlert | None:
     text = _read_text(SESSION_CURRENT)
     if not text:
         return None
@@ -295,7 +310,10 @@ def _check_trap3_memory_drift() -> dict | None:
     # B: drift numerico MRR session vs KPI.md
     session_mrr = _extract_session_mrr(text)
     kpi_mrr = _parse_int(_parse_frontmatter(_read_text(KPI_FILE)).get("mrr", ""))
-    if session_mrr is not None and kpi_mrr is not None:
+    if session_mrr == -1:
+        # Sentinel sess.1534 round 10: MRR mentioned but parse failed.
+        reasons.append("MRR_UNPARSEABLE in session_current (frontmatter+body)")
+    elif session_mrr is not None and kpi_mrr is not None:
         delta = abs(session_mrr - kpi_mrr)
         if delta > TRAP3_MRR_DRIFT_TOLERANCE:
             reasons.append(f"MRR session={session_mrr} vs KPI={kpi_mrr} (Δ={delta})")
@@ -322,7 +340,7 @@ _SENTINEL_RX = re.compile(
 )
 
 
-def _check_trap4_consensus() -> dict | None:
+def _check_trap4_consensus() -> TrapAlert | None:
     if not MEMORY_SENTINEL.exists():
         return None
     out = _run([str(MEMORY_SENTINEL), "--silent"])
@@ -390,7 +408,7 @@ def _extract_event_start(ev: dict) -> str | None:
     return None
 
 
-def _check_trap5_event_stuffing() -> dict | None:
+def _check_trap5_event_stuffing() -> TrapAlert | None:
     if not CALENDAR_CACHE.exists():
         return None
     raw = _read_text(CALENDAR_CACHE)
@@ -453,13 +471,24 @@ _TRAP_FUNCS = (
 
 
 @cached(ttl=300.0)
-def detect_active_traps() -> list[dict]:
-    """Esegue tutti i 5 detector e ritorna lista trap attivi. Cached 300s."""
-    traps: list[dict] = []
+def detect_active_traps() -> list[TrapAlert]:
+    """Esegue tutti i 5 detector e ritorna lista trap attivi. Cached 300s.
+
+    Antifragile (sess.1534 round 10): un detector che esplode diventa esso
+    stesso un trap (DETECTOR_FAILED P1) invece di sparire silenziosamente.
+    """
+    traps: list[TrapAlert] = []
     for fn in _TRAP_FUNCS:
         try:
             res = fn()
-        except Exception:  # graceful: detector fail ≠ crash banner
+        except Exception as e:  # detector failure = trap
+            traps.append({
+                "trap": "DETECTOR_FAILED",
+                "evidence": f"{fn.__name__}: {type(e).__name__}: {e}"[:200],
+                "severity": "P1",
+                "mitigation": "Investigate detector regression",
+                "cicatrice_ref": "antifragile-immune sess.1512",
+            })
             res = None
         if res:
             traps.append(res)

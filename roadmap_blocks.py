@@ -5,14 +5,13 @@ roadmap_q2_2026.md, classifies severity, computes D+ counters, audits drift
 against recent session files, and renders a Rich markup string.
 
 Public API:
-    read_blocks(force_refresh=False) -> list[dict]
+    read_blocks(force_refresh=False) -> list[BlockEntry]
     render_blocks_section(blocks=None) -> str
 """
 from __future__ import annotations
 
 import re
 from datetime import date
-from pathlib import Path
 from typing import Optional
 
 from roadmap_common import (
@@ -20,10 +19,12 @@ from roadmap_common import (
     ROADMAP_Q2 as _ROADMAP,
     SESSIONI_DIR as _SESSIONI,
     IT_MONTHS_SHORT,
-    today_date,
+    BlockEntry,
     cached,
     read_text,
     severity_color as _common_severity_color,
+    severity_icon,
+    today_date,
 )
 
 # Round 9 (sess.1534): TODAY non più frozen all'import — TUI long-running
@@ -230,7 +231,7 @@ def _drift_audit(blocks: list[dict], session_text: str) -> dict[str, dict]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 @cached(ttl=60.0)
-def read_blocks() -> list[dict]:
+def read_blocks() -> list[BlockEntry]:
     """Parse roadmap and return enriched block dicts. Cached 60s."""
     text = read_text(_ROADMAP)
     if not text:
@@ -249,30 +250,22 @@ def read_blocks() -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Severity helpers (info-lime → LIME via roadmap_common)
+# Severity sort order (K2 Plan B: color/icon da common, sort order locale per
+# preservare semantica 'info-lime' = least-urgent → ultimo in ascending sort)
 # ══════════════════════════════════════════════════════════════════════════════
 
-_SEV_ORDER = {"P0": 0, "P1": 1, "info": 2, "info-lime": 3}
-
-_BLOCK_ICONS = {"P0": "🔴", "P1": "🟡", "info": "·", "info-lime": "·"}
-
-
-def _severity_icon(sev: str) -> str:
-    return _BLOCK_ICONS.get(sev, "·")
-
-
-def _severity_color(sev: str) -> str:
-    # Override locale: 'info' usa DIM (no warning glow), 'info-lime' usa LIME
-    if sev == "info-lime":
-        return LIME
-    return _common_severity_color(sev)
+# Local sort: info-lime sorts after info perché semanticamente più "calma"
+# (verde lime = appena entrato in finestra). Se passassimo da severity_rank()
+# in common, info e info-lime collidono allo stesso rank — accettabile per
+# altri moduli ma qui rompe l'intent visivo.
+_SEV_ORDER: dict[str, int] = {"P0": 0, "P1": 1, "info": 2, "info-lime": 3}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Renderer
 # ══════════════════════════════════════════════════════════════════════════════
 
-def render_blocks_section(blocks: list[dict] | None = None) -> str:
+def render_blocks_section(blocks: list[BlockEntry] | None = None) -> str:
     """Return Rich markup string for the Blocchi Viventi section."""
     if blocks is None:
         blocks = read_blocks()
@@ -294,8 +287,8 @@ def render_blocks_section(blocks: list[dict] | None = None) -> str:
     lines = [header]
     for b in sorted_blocks:
         sev = b["severity"]
-        color = _severity_color(sev)
-        icon  = _severity_icon(sev)
+        color = _common_severity_color(sev)
+        icon  = severity_icon(sev)
         deadline = b.get("deadline")
         dl_str = f" ({deadline})" if deadline else ""
         ghost_flag = " [blink]👻 fantasma[/blink]" if b.get("is_ghost") else ""

@@ -9,11 +9,17 @@ Estratto in round 5-7 (sess.1534) per ridurre duplicazione cross-module:
   - Severity → colore / icon mapping (round 7)
   - cached(ttl) decorator per i moduli con cache TTL boilerplate (round 7)
 
+K2 Plan B (sess.1534): `Severity` Literal + TypedDict per le 5 entry shape +
+`severity_rank()` ordering helper. Centralizza la palette severity (P0/P1/P2/
+info/info-lime/noise) eliminando la duplicazione ad-hoc nei moduli consumer.
+
 Public API target:
     from roadmap_common import (
         VAULT_BASE, KPI_FILE, RED, ORANGE, LIME, DIM, TEAL,
         today_iso, today_date, IT_MONTHS, read_text, parse_frontmatter,
-        parse_int_eur, severity_color, severity_icon, cached,
+        parse_int_eur, severity_color, severity_icon, severity_rank, cached,
+        Severity, OutstandingEntry, BlockEntry, FilamentDict,
+        TrapAlert, PhaseState,
     )
 """
 from __future__ import annotations
@@ -24,7 +30,7 @@ import time
 from datetime import date
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Final, Literal, Optional, TypedDict
 
 # ── Color palette (hex inline, allineata a app.py + Polpo Brand) ──────────────
 RED        = "#ff3366"
@@ -129,21 +135,41 @@ MONTH_LOOKUP: dict[str, int] = {
 IT_WEEKDAYS = {"lun", "mar", "mer", "gio", "ven", "sab", "dom"}
 
 
-# ── Severity helpers (round 7: estratti da blocks/outstanding) ────────────────
-_SEVERITY_COLOR: dict[str, str] = {
+# ── Severity types + helpers (K2 Plan B: Literal centralizzato) ──────────────
+Severity = Literal["P0", "P1", "P2", "info", "info-lime", "noise"]
+
+SEVERITY_VALUES: Final[frozenset[str]] = frozenset(
+    {"P0", "P1", "P2", "info", "info-lime", "noise"}
+)
+
+# Ordering rank for sort/compare. Lower = more critical.
+# P1/P2 share rank 1 (entrambe warning); info/info-lime share rank 2
+# (entrambe non-critical); noise rank 3 = silenzio totale.
+SEVERITY_RANK: Final[dict[str, int]] = {
+    "P0":        0,
+    "P1":        1,
+    "P2":        1,
+    "info":      2,
+    "info-lime": 2,
+    "noise":     3,
+}
+
+_SEVERITY_COLOR: Final[dict[str, str]] = {
     "P0":        RED,
     "P1":        ORANGE,
     "P2":        ORANGE,
     "info":      DIM,
     "info-lime": LIME,
+    "noise":     DIM,
 }
 
-_SEVERITY_ICON: dict[str, str] = {
+_SEVERITY_ICON: Final[dict[str, str]] = {
     "P0":        "🔴",
     "P1":        "🟡",
     "P2":        "🟡",
     "info":      "·",
     "info-lime": "·",
+    "noise":     "·",
 }
 
 
@@ -155,6 +181,73 @@ def severity_color(sev: str) -> str:
 def severity_icon(sev: str) -> str:
     """Icona Unicode per una severity. Default → '·'."""
     return _SEVERITY_ICON.get(sev, "·")
+
+
+def severity_rank(sev: str) -> int:
+    """Ordering rank per sort/comparison. Lower = più critica.
+
+    Default 99 per severity unknown — finiscono in fondo a sort ascendenti.
+    """
+    return SEVERITY_RANK.get(sev, 99)
+
+
+# ── TypedDict per le 5 entry shape (K2 Plan B: type contract chiaro) ──────────
+# Annotare le firme pubbliche permette a mypy/IDE di catturare KeyError prima
+# di runtime e documenta il contratto cross-modulo. Zero runtime cost.
+
+class OutstandingEntry(TypedDict):
+    cliente: str
+    amount: int
+    days_aged: Optional[int]
+    severity: Severity
+    note: str
+    next_action: Optional[str]
+
+
+class BlockEntry(TypedDict, total=False):
+    name: str
+    da_quanto_raw: str
+    da_quanto_days: int
+    energia_bloccata: str
+    sblocco: str
+    owner: str
+    severity: Severity
+    deadline: Optional[str]
+    warnings: list[str]
+    drift_hits: int
+    is_ghost: bool
+
+
+class FilamentDict(TypedDict):
+    name: str
+    severity: Severity
+    stato: str
+    segnale_vita: str
+    segnale_morte: str
+    days_drift: Optional[int]
+    deadline: Optional[str]
+
+
+class TrapAlert(TypedDict):
+    trap: str
+    evidence: str
+    severity: Severity
+    mitigation: str
+    cicatrice_ref: str
+
+
+class PhaseState(TypedDict, total=False):
+    mrr: Optional[int]
+    mrr_target: int
+    outstanding: Optional[int]
+    outstanding_target: int
+    contracts_signed: int
+    aurahome_status: str
+    conditions_met: int
+    kill_days_remaining: Optional[int]
+    kill_date_str: str
+    kill_target: int
+    kill_clients_paid: int
 
 
 # ── File reader (round 7: graceful read pattern condiviso) ────────────────────

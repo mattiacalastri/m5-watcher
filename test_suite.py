@@ -485,6 +485,57 @@ class TestHeadlessTextual(unittest.IsolatedAsyncioTestCase):
             modes = list(graph_widget.FILTER_MODES)
             self.assertEqual(after, modes[(modes.index(initial) + 1) % len(modes)])
 
+    async def test_all_tab_panes_have_header(self):
+        """sess.1539: ogni TabPane deve esporre un header banner uniforme."""
+        from app import M5Watcher
+        async with M5Watcher().run_test(headless=True) as pilot:
+            expected = [
+                "heat-header", "analytics-header", "procs-header", "tent-header",
+                "graph-header", "kpi-header", "logs-header", "sent-header",
+                "debug-header",
+            ]
+            for hid in expected:
+                w = pilot.app.query_one(f"#{hid}")
+                self.assertIsNotNone(w, f"missing header #{hid}")
+
+    async def test_titlebar_kpi_line5_renders_with_units(self):
+        """sess.1539: line5 KPI deve esporre Nome+Dato+Unità dopo seed _kpi_data."""
+        from app import M5Watcher, TitleBar
+        async with M5Watcher().run_test(headless=True) as pilot:
+            pilot.app._kpi_data = {
+                'mrr': 4124.0, 'mrr_previous': 3624.0,
+                'outstanding': 5009.0, 'pipeline_weighted': 48668.0,
+                'setter_active': 274.0, 'setter_cold_avg': 43.3,
+            }
+            pilot.app._update_subtitle(cpu=10.0, load=2.0)
+            await pilot.pause(0.05)
+            tb = pilot.app.query_one("#title-bar", TitleBar)
+            payload = tb.rich_info.get('kpi') or {}
+            self.assertEqual(payload.get('mrr'), 4124.0)
+            self.assertEqual(payload.get('mrr_delta'), 500.0)
+            self.assertEqual(payload.get('cold_avg'), 43.3)
+            # _last_paint = (ascii_banner, line1, line2, line3, line4, line5)
+            tb._repaint()
+            self.assertIsNotNone(tb._last_paint)
+            line5 = tb._last_paint[5] if len(tb._last_paint) >= 6 else ''
+            self.assertIn('€', line5, f"line5 missing currency unit: {line5[:200]}")
+            self.assertIn('gg', line5, f"line5 missing gg unit: {line5[:200]}")
+
+    async def test_titlebar_uniform_height_across_tabs(self):
+        """sess.1539: TitleBar non deve cambiare altezza tra tab data-dense
+        e tab strategici (rimosso shrink is_dense)."""
+        from app import M5Watcher, TitleBar
+        async with M5Watcher().run_test(headless=True) as pilot:
+            tb = pilot.app.query_one("#title-bar", TitleBar)
+            heights = []
+            for key in ("1", "2", "3", "7", "9"):  # heat, stats, procs, logs, debug
+                await pilot.press(key)
+                await pilot.pause(0.05)
+                heights.append(tb.styles.height)
+            # tutti uguali → uniforme cross-tab
+            self.assertEqual(len(set(str(h) for h in heights)), 1,
+                             f"TitleBar height varies across tabs: {heights}")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 10. KPI WIDGET

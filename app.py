@@ -881,6 +881,17 @@ def _safe_render_blocks() -> str:
         return ""
 
 
+def _safe_render_outstanding() -> str:
+    """Round 6 — outstanding aging dynamic per cliente."""
+    m = _lazy_roadmap_module("roadmap_outstanding")
+    if m is None:
+        return ""
+    try:
+        return m.render_outstanding_section()
+    except Exception:
+        return ""
+
+
 def _render_activity_header(meta: dict) -> str:
     """Dynamic ACTIVITY STREAM header — sess.1534.
 
@@ -1195,18 +1206,18 @@ def render_sentinel(data: dict) -> tuple[str, str]:
 
 
 class TitleBar(Static):
-    """Fascia titolo centrata a 5 righe:
+    """Fascia titolo centrata (presenza identitaria costante in TUTTI i tab):
     riga 1: emoji + titolo rainbow ad onda (centrato)
     riga 2: subtitle hardware identity (centrato)
     riga 3: rich info — sessione, uptime, # Claude, ora locale (centrato)
     riga 4: status live — bat/cpu/load/ram pressure/disk/net (centrato)
-    riga 5: spacer
+    riga 5: business KPI — MRR / Outstanding / Pipeline / Lead / Cold (centrato, sess.1539)
     """
 
     DEFAULT_CSS = f"""
     TitleBar {{
         height: auto;
-        min-height: 6;
+        min-height: 7;
         background: {BG};
         padding: 1 3;
         color: {FG};
@@ -1214,9 +1225,8 @@ class TitleBar(Static):
         text-align: center;
     }}
     """
-    # NB: height ora dinamica via on_resize → styles.height (6/8/15) — sess.1508
-    # audit fix: prima collideva con `height: 15` fisso e clippava ASCII banner.
-    # `content-align: center middle` rimosso (no-op con height==content).
+    # sess.1539: min-height bumped 6→7 per ospitare line5 KPI business.
+    # Height dinamica on_resize → styles.height (7/9/16): banner ASCII + 5 righe.
 
     TITLE_TEXT = "M5 MAX WATCHER"
     EMOJI      = "🐙"
@@ -1322,13 +1332,54 @@ class TitleBar(Static):
             )
 
         line4 = self.status if self.status else f"[{DIM}]🔄 Probing system…[/]"
+
+        # sess.1539: line5 BUSINESS KPI — Nome KPI · Dato · Unità di Misura.
+        # Visibile in TUTTI i tab (header globale). Compatta sotto 100 cols.
+        kpi = info.get('kpi') or {}
+        if kpi:
+            mrr      = kpi.get('mrr',         0.0)
+            mrr_d    = kpi.get('mrr_delta',   0.0)
+            outstand = kpi.get('outstanding', 0.0)
+            pipe     = kpi.get('pipeline',    0.0)
+            leads    = int(kpi.get('leads',   0))
+            cold_avg = kpi.get('cold_avg',    0.0)
+            d_color  = LIME if mrr_d >= 0 else HOT_PINK
+            d_sign   = '+' if mrr_d >= 0 else ''
+            if cols >= 100:
+                line5 = (
+                    f"💰 [{DIM}]MRR[/] [bold {LIME}]€{mrr:,.0f}[/] [{d_color}]{d_sign}{mrr_d:,.0f}€[/]"
+                    f"{sep}📌 [{DIM}]Outstanding[/] [bold {HOT_PINK}]€{outstand:,.0f}[/]"
+                    f"{sep}🎯 [{DIM}]Pipeline[/] [bold {ELEC_BLUE}]€{pipe:,.0f}[/]"
+                    f"{sep}🔥 [{DIM}]Lead[/] [bold {ORANGE}]{leads}[/]"
+                    f"{sep}🕐 [{DIM}]Cold[/] [bold {YELLOW}]{cold_avg:.1f} gg[/]"
+                )
+            elif cols >= 80:
+                line5 = (
+                    f"💰[bold {LIME}]€{mrr:,.0f}[/] [{d_color}]{d_sign}{mrr_d:,.0f}[/]  "
+                    f"📌[bold {HOT_PINK}]€{outstand:,.0f}[/]  "
+                    f"🎯[bold {ELEC_BLUE}]€{pipe:,.0f}[/]  "
+                    f"🔥[bold {ORANGE}]{leads}[/]  "
+                    f"🕐[bold {YELLOW}]{cold_avg:.1f}gg[/]"
+                )
+            else:
+                # sess.1539: anche al breakpoint <80 mantieni Nome+Dato+Unità.
+                # Compatto K-notation per restare nello stretto.
+                line5 = (
+                    f"💰 [bold {LIME}]€{mrr/1000:.1f}K[/]  "
+                    f"📌 [bold {HOT_PINK}]€{outstand/1000:.1f}K[/]  "
+                    f"🎯 [bold {ELEC_BLUE}]€{pipe/1000:.1f}K[/]  "
+                    f"🔥 [bold {ORANGE}]{leads}[/]"
+                )
+        else:
+            line5 = f"[{DIM}]🔄 Loading KPI from vault…[/]"
+
         # sess.1508 round 2: diff cache — skip self.update() se identico.
         # A 4fps phase ricalcola, ma se quantizzata = uguale → no paint.
-        paint = (ascii_banner, line1, line2, line3, line4)
+        paint = (ascii_banner, line1, line2, line3, line4, line5)
         if paint == self._last_paint:
             return
         self._last_paint = paint
-        self.update(f"{ascii_banner}{line1}\n{line2}\n{line3}\n{line4}")
+        self.update(f"{ascii_banner}{line1}\n{line2}\n{line3}\n{line4}\n{line5}")
 
 
 # ── Triage Screen ─────────────────────────────────────────────────────────────
@@ -1672,7 +1723,18 @@ class M5Watcher(App):
         width: 2fr;
         height: 1fr;
     }}
-    #logs-header {{
+    /* sess.1539: header uniforme per ogni TabPane — stessa metrica
+       (height: auto + padding-bottom 1) per coerenza visiva cross-tab. */
+    #heat-header,
+    #analytics-header,
+    #procs-header,
+    #tent-header,
+    #graph-header,
+    #kpi-header,
+    #logs-header,
+    #sent-header,
+    #debug-header {{
+        height: auto;
         padding: 0 0 1 0;
     }}
     #log-table {{
@@ -1804,10 +1866,19 @@ class M5Watcher(App):
         yield TitleBar(id="title-bar")
         with TabbedContent(id="tab-area"):
             with TabPane("🌡 Heatmap", id="tab-heat"):
+                # sess.1539: header uniforme cross-tab (Nome · tagline · poetic line)
+                yield Static(
+                    f"[bold {HOT_PINK}]🌡 CORE HEATMAP[/]  [{DIM}]· 18 cores live · M5 Max[/]\n"
+                    f"[italic {DIM}]Eighteen heartbeats in parallel — see where the silicon burns and where it breathes.[/]",
+                    id="heat-header")
                 with Horizontal(id="heat-row"):
                     yield Static(f"[{DIM}]Accumulating core samples…[/]", id="heat-static")
                     yield Static(f"[{DIM}]🔄 Loading voice…[/]", id="voice-static")
             with TabPane("📈 Analytics", id="tab-stats"):
+                yield Static(
+                    f"[bold {LIME}]📈 SYSTEM ANALYTICS[/]  [{DIM}]· CPU/RAM trend · forecasts[/]\n"
+                    f"[italic {DIM}]The shape of time — sparklines, deltas, predictions of where this system is heading.[/]",
+                    id="analytics-header")
                 yield Static(f"[{DIM}]Building statistics…[/]", id="analytics-static")
             with TabPane("🔝 Processes", id="tab-procs"):
                 with ScrollableContainer(id="procs-box"):
@@ -1819,36 +1890,49 @@ class M5Watcher(App):
             with TabPane("🐙 Tentacoli", id="tab-tent"):
                 with ScrollableContainer(id="tent-box"):
                     yield Static(
-                        render_focus({}),
-                        id="focus-static")
-                    yield Static(
-                        f"\n[bold {HOT_PINK}]🐙 POLPO TENTACOLI[/]  [{DIM}]· background workers[/]\n"
+                        f"[bold {HOT_PINK}]🐙 POLPO TENTACOLI[/]  [{DIM}]· background workers[/]\n"
                         f"[italic {DIM}]The autonomic nervous system of the Polpo — Claude, MCP, daemons, watchdogs, alive.[/]",
                         id="tent-header")
+                    yield Static(
+                        render_focus({}),
+                        id="focus-static")
                     yield DataTable(id="tent-table", cursor_type="row", zebra_stripes=True)
             with TabPane("🕸 Graph", id="tab-graph"):
                 with ScrollableContainer(id="graph-scroll"):
                     yield Static(
+                        f"[bold {TEAL}]🕸 OBSIDIAN GRAPH[/]  [{DIM}]· vault knowledge map[/]\n"
+                        f"[italic {DIM}]Notes are nodes, links are synapses — the second brain seen from above.[/]",
+                        id="graph-header")
+                    yield Static(
                         f"[{DIM}]🔄 Parsing vault Obsidian…[/]",
                         id="graph-static")
             with TabPane("📊 KPI", id="tab-kpi"):
+                yield Static(
+                    f"[bold {WHITE}]📊 BUSINESS KPI[/]  [{DIM}]· Astra Digital · MRR · Outstanding · Pipeline[/]\n"
+                    f"[italic {DIM}]The numbers that decide the month — every euro accounted, every lead tracked.[/]",
+                    id="kpi-header")
                 yield Static(f"[{DIM}]🔄 Leggendo KPI.md dal vault…[/]", id="kpi-static")
             with TabPane("📋 Logs", id="tab-logs"):
                 with ScrollableContainer(id="logs-scroll"):
-                    # sess.1534 round 4: roadmap-aware cockpit. 5 strip sopra
-                    # ACTIVITY STREAM (Polestar, Vettori, Trap, Filamenti, Blocchi).
-                    # Ognuna con refresh TTL diverso, popolata da _refresh_slow.
-                    yield Static("", id="polestar-strip",    markup=True)
-                    yield Static("", id="vectors-strip",     markup=True)
-                    yield Static("", id="traps-banner",      markup=True)
-                    yield Static("", id="filaments-section", markup=True)
-                    yield Static("", id="blocks-section",    markup=True)
                     yield Static(
                         f"[bold {ORANGE}]📋 ACTIVITY STREAM[/]  [{DIM}]· cross-system log cascade[/]\n"
                         f"[italic {DIM}]Every signal from every tentacolo — leads, payments, calls, voice, security.[/]",
                         id="logs-header")
+                    # sess.1534 round 4-6: roadmap-aware cockpit. 6 strip sotto
+                    # l'header. Outstanding (round 6) per primo — è il battito
+                    # revenue del business e deve essere la prima cosa visibile.
+                    yield Static("", id="polestar-strip",      markup=True)
+                    yield Static("", id="outstanding-section", markup=True)
+                    yield Static("", id="vectors-strip",       markup=True)
+                    yield Static("", id="traps-banner",        markup=True)
+                    yield Static("", id="filaments-section",   markup=True)
+                    yield Static("", id="blocks-section",      markup=True)
                     yield DataTable(id="log-table", cursor_type="row", zebra_stripes=True)
             with TabPane("🛡 Sentinel", id="tab-sent"):
+                yield Static(
+                    f"[bold {RED}]🛡 CYBER SENTINEL[/]  [{DIM}]· auth · canaries · alerts[/]\n"
+                    f"[italic {DIM}]The immune system watching the watchers — credentials, breaches, drift.[/]",
+                    id="sent-header")
                 with Horizontal(id="sentinel-row"):
                     with ScrollableContainer(id="canary-panel"):
                         yield Static("", id="canary-static")
@@ -1857,6 +1941,10 @@ class M5Watcher(App):
             # sess.1508 round 4: telemetry spine — claim verifiability live.
             with TabPane("🔬 Debug", id="tab-debug"):
                 with ScrollableContainer(id="debug-scroll"):
+                    yield Static(
+                        f"[bold {ELEC_BLUE}]🔬 TELEMETRY SPINE[/]  [{DIM}]· claim verifiability · render counts[/]\n"
+                        f"[italic {DIM}]Where the app dissects itself — every render, every diff, every webhook fired.[/]",
+                        id="debug-header")
                     yield Static("", id="debug-static")
         with Horizontal(id="top-row"):
             with ScrollableContainer(id="cpu-panel"):
@@ -1949,7 +2037,7 @@ class M5Watcher(App):
         else:
             show = self._rows >= 35 and self._cols >= 52
         title_bar.show_ascii = show
-        title_bar.styles.height = 6 if self._rows < 35 else (15 if show else 8)
+        title_bar.styles.height = 7 if self._rows < 35 else (16 if show else 9)
         self._center_tabs()
         # sess.1525: layout refresh immediato per cancellare Footer/body ghost
         # durante il delta debounce — Textual diffa solo le celle cambiate,
@@ -1983,27 +2071,20 @@ class M5Watcher(App):
         fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent", "tab-debug"}
         hide = event.pane is not None and event.pane.id in fullscreen_tabs
         self.query_one("#top-row").display = not hide
-        # sess.1525: TitleBar adaptive per-tab — collassa a 6 righe sui tab
-        # data-dense (Heatmap/Logs/Processes/Tentacoli/Debug) per dare più
-        # respiro alle metriche; resta full sui tab strategici (KPI/Analytics/
-        # Sentinel/Graph) dove il banner POLPO è "presenza identitaria".
-        dense_tabs = {"tab-heat", "tab-logs", "tab-procs", "tab-tent", "tab-debug"}
-        is_dense = event.pane is not None and event.pane.id in dense_tabs
+        # sess.1539: TitleBar UNIFORME cross-tab — rimosso lo shrink per-tab
+        # (prima collassava a 6 righe su Heatmap/Logs/Procs/Tent/Debug).
+        # Sizing ora deciso solo da on_resize (cols/rows-based): l'header è
+        # presenza identitaria costante che non saltella tra tab.
         try:
             title_bar = self.query_one("#title-bar", TitleBar)
-            if is_dense:
-                title_bar.show_ascii = False
-                title_bar.styles.height = 6
+            if os.environ.get("M5W_NO_ASCII") == "1":
+                show = False
+            elif os.environ.get("M5W_FORCE_ASCII") == "1":
+                show = True
             else:
-                # Restore: rispetta env override + criteri _rows/_cols correnti
-                if os.environ.get("M5W_NO_ASCII") == "1":
-                    show = False
-                elif os.environ.get("M5W_FORCE_ASCII") == "1":
-                    show = True
-                else:
-                    show = self._rows >= 35 and self._cols >= 52
-                title_bar.show_ascii = show
-                title_bar.styles.height = 6 if self._rows < 35 else (15 if show else 8)
+                show = self._rows >= 35 and self._cols >= 52
+            title_bar.show_ascii = show
+            title_bar.styles.height = 7 if self._rows < 35 else (16 if show else 9)
         except Exception:
             pass
 
@@ -2039,9 +2120,10 @@ class M5Watcher(App):
         asyncio.create_task(self._prewarm_roadmap_cache())
 
     async def _prewarm_roadmap_cache(self) -> None:
-        """Background prewarm — riempie le cache TTL dei 5 moduli roadmap."""
+        """Background prewarm — riempie le cache TTL dei 6 moduli roadmap."""
         await asyncio.gather(
             asyncio.to_thread(_safe_render_polestar),
+            asyncio.to_thread(_safe_render_outstanding),
             asyncio.to_thread(_safe_render_filaments),
             asyncio.to_thread(_safe_render_blocks),
             asyncio.to_thread(_safe_render_vectors),
@@ -2333,11 +2415,12 @@ class M5Watcher(App):
         self._render_logs(self._log_entries)
         self._render_sentinel(self._sentinel_data)
 
-        # sess.1534 round 4: roadmap-aware strip refresh.
-        # vector cold ~240ms / trap cold ~458ms (vault scan + subprocess).
+        # sess.1534 round 4-6: roadmap-aware strip refresh (6 moduli).
+        # Cold timings: vector ~240ms, trap ~310ms, others <10ms.
         # asyncio.to_thread parallelo + return_exceptions per failure isolation.
         roadmap_renders = await asyncio.gather(
             asyncio.to_thread(_safe_render_polestar),
+            asyncio.to_thread(_safe_render_outstanding),
             asyncio.to_thread(_safe_render_vectors),
             asyncio.to_thread(_safe_render_traps),
             asyncio.to_thread(_safe_render_filaments),
@@ -2345,8 +2428,8 @@ class M5Watcher(App):
             return_exceptions=True,
         )
         for widget_id, result in zip(
-            ("polestar-strip", "vectors-strip", "traps-banner",
-             "filaments-section", "blocks-section"),
+            ("polestar-strip", "outstanding-section", "vectors-strip",
+             "traps-banner", "filaments-section", "blocks-section"),
             roadmap_renders,
         ):
             if isinstance(result, Exception):
@@ -2501,6 +2584,28 @@ class M5Watcher(App):
 
         # Rich-info header (refresh ogni tick fast)
         uptime_s = int(time.time() - self._boot_time)
+        # sess.1539: KPI business per line5 TitleBar (Nome · Dato · Unità).
+        # _kpi_data popolato da _refresh_slow → kpi_widget.read_kpi_data.
+        # Sicuro contro dict vuoto (TitleBar mostra placeholder loading).
+        k = self._kpi_data or {}
+        try:
+            mrr_v       = float(k.get('mrr',                0) or 0)
+            mrr_prev_v  = float(k.get('mrr_previous',       mrr_v) or mrr_v)
+            outstand_v  = float(k.get('outstanding',         0) or 0)
+            pipeline_v  = float(k.get('pipeline_weighted',   0) or 0)
+            active_v    = float(k.get('setter_active',       0) or 0)
+            cold_avg_v  = float(k.get('setter_cold_avg',     0) or 0)
+            kpi_payload = {
+                'mrr':         mrr_v,
+                'mrr_delta':   mrr_v - mrr_prev_v,
+                'outstanding': outstand_v,
+                'pipeline':    pipeline_v,
+                'leads':       active_v,
+                'cold_avg':    cold_avg_v,
+            } if k else {}
+        except (TypeError, ValueError):
+            kpi_payload = {}
+
         rich = {
             'session':      self._sess_n,
             'uptime':       _format_uptime(uptime_s),
@@ -2508,6 +2613,7 @@ class M5Watcher(App):
             'mcp_count':    self._proc_counts.get('mcp', 0),
             'time':         time.strftime("%H:%M:%S"),
             'cols':         self._cols,
+            'kpi':          kpi_payload,
         }
 
         title_bar = self.query_one("#title-bar", TitleBar)

@@ -5,6 +5,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 
 ---
 
+## [2.5.0] — 2026-05-04 · Unified Header + KPI line5 (sess.1539)
+
+**Released sess.1539** — header coerente cross-tab e KPI business sempre
+visibili. Identità visiva costante: l'header non saltella più tra tab.
+
+### Added
+- **TitleBar line5 — Business KPI band** sempre presente: 💰 MRR · 📌 Outstanding
+  · 🎯 Pipeline · 🔥 Lead · 🕐 Cold avg. Pattern uniforme `Nome KPI · Dato · Unità`,
+  responsive su 3 breakpoint (≥100, ≥80, <80 cols)
+- **Per-tab header banner** uniforme su tutti i 9 TabPane (Heatmap, Analytics,
+  Processes, Tentacoli, Graph, KPI, Logs, Sentinel, Debug). Pattern condiviso
+  `[bold COLOR]EMOJI NAME[/] · tagline\n[italic DIM]poetic line[/]`
+- **CSS `*-header` unificato** — height: auto + padding 0 0 1 0 per coerenza visiva
+
+### Changed
+- **TitleBar uniforme cross-tab** — rimossa logica `is_dense` che collassava
+  l'header a 6 righe sui tab data-dense (Heatmap/Logs/Procs/Tent/Debug). Sizing
+  ora deciso solo da `on_resize` (cols/rows-based)
+- **TitleBar height bumped** 6/8/15 → 7/9/16 per ospitare line5 KPI
+- **Logs tab strip order** — header `📋 ACTIVITY STREAM` ora sopra le 5 strip
+  roadmap (Polestar/Vettori/Trap/Filamenti/Blocchi) per gerarchia visiva chiara
+- **Cold avg precision** `:.0f` → `:.1f` gg (granularità decimale)
+
+---
+
 ## [2.4.0] — 2026-05-03 · UNIFEED Event Panel (sess.1465)
 
 **Released sess.1465** — live event feed under Unified Memory panel.

@@ -1306,12 +1306,15 @@ class M5Watcher(App):
         width: 100%;
         margin: 0;
         padding: 0;
+    }}
+    Tabs #tabs-list {{
+        min-width: auto;
+    }}
+    Tabs #tabs-list-bar {{
+        min-width: auto;
         align-horizontal: center;
     }}
     Tabs > #tabs-scroll {{
-        align-horizontal: center;
-    }}
-    Underline {{
         align-horizontal: center;
     }}
     Tab {{

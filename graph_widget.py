@@ -1,53 +1,52 @@
-"""Vault Intelligence Panel — Neural Density cockpit. Polpo palette. Rich markup."""
+"""Vault Intelligence Panel — Neural Density cockpit. Polpo palette. Rich markup.
+
+Primitive grafiche unificate via polpo_charts.py (sess.1508 audit).
+"""
 from __future__ import annotations
 
-import json
 from collections import deque
-from pathlib import Path
 from statistics import mean
 from typing import Optional
 
 import networkx as nx
 
-_P        = json.loads((Path(__file__).parent / "polpo.tokens.json").read_text())["palette"]
-TEAL      = _P["polpo_teal"]       # #00d4aa
-DIM       = _P["polpo_dim"]        # #6b7a8f
-FG        = _P["polpo_fg"]         # #e6f1ff
-WHITE     = "#ffffff"
-HOT_PINK  = "#ff2d92"
-ELEC_BLUE = "#00e5ff"
-LIME      = "#a8ff60"
-ORANGE    = "#ff8a3d"
-DEEP_PURPL = "#9d4dff"
-SOFT_GREEN = "#5dffaa"
+from polpo_charts import (
+    TEAL, DIM, FG, WHITE,
+    HOT_PINK, ELEC_BLUE, LIME, ORANGE, DEEP_PURPL, SOFT_GREEN, ENERGY_YEL,
+    sparkline as _spark_unified,
+    pct_bar as _pct_bar_unified,
+    proportional_bar,
+    gauge as _gauge_unified,
+    pct_color as _pct_color_unified,
+    gb as _gb_unified,
+)
 
 FILTER_MODES    = ("all", "moc", "orphan")
 MAX_FOCUS_NODES = 40
 CANVAS_W        = 90
 CANVAS_H        = 28
 
-# ── Minimal system-metric helpers (no import from app.py) ────────────────────
-_SPARK = ' ▁▂▃▄▅▆▇█'
 
+# ── Local thin shims (back-compat con i call site esistenti) ─────────────────
 def _sparkline(data: "deque[float]", w: int = 50) -> str:
-    vals = list(data)[-w:]
-    if not vals:
-        return f'[{DIM}]{"─" * w}[/]'
-    mx = max(vals) or 1
-    return ''.join(_SPARK[min(8, int(v / mx * 8))] for v in vals)
+    """Sparkline normalize **min-max** (sess.1508 fix)."""
+    return _spark_unified(data, w)
+
 
 def _pct_bar(pct: float, w: int = 20) -> str:
-    filled = round(min(pct, 100) / 100 * w)
+    """Barra 2-step nuda (no markup) per integrazione in stringhe colorate esterne."""
+    p = max(0.0, min(100.0, pct))
+    filled = round(p / 100 * w)
     return '█' * filled + '░' * (w - filled)
 
+
 def _pct_color(pct: float) -> str:
-    if pct >= 80: return HOT_PINK
-    if pct >= 60: return ORANGE
-    if pct >= 40: return "#e6c84a"  # yellow
-    return LIME
+    return _pct_color_unified(pct)
+
 
 def _gb(n: int) -> str:
-    return f"{n / 1024 ** 3:.1f}G"
+    return _gb_unified(n)
+
 
 # Neural density gauge thresholds (realistic for large knowledge graphs ~3k notes)
 _ND_LOW  = 0.0003   # very sparse
@@ -57,17 +56,16 @@ _ND_HIGH = 0.002    # dense
 
 def _bar(val: float, total: float, w: int = 20, color: str = LIME) -> str:
     """Proportional filled bar."""
-    filled = min(w, round(val / max(total, 1e-9) * w))
-    return f'[{color}]{"█" * filled}[/][{DIM}]{"░" * (w - filled)}[/]'
+    return proportional_bar(val, total, w, color)
 
 
-def _gauge(val: float, lo: float, hi: float, w: int = 24) -> tuple[str, str]:
-    """Linear gauge mapped to [lo, hi]. Returns (bar_markup, color)."""
-    norm  = max(0.0, min(1.0, (val - lo) / max(hi - lo, 1e-9)))
-    color = LIME if norm >= 0.65 else (TEAL if norm >= 0.35 else ORANGE)
-    filled = round(norm * w)
-    bar = f'[{color}]{"█" * filled}[/][{DIM}]{"░" * (w - filled)}[/]'
-    return bar, color
+def _gauge(val: float, lo: float, hi: float, w: int = 24,
+           higher_is_better: bool = True) -> tuple[str, str]:
+    """Linear gauge mapped to [lo, hi]. Returns (bar_markup, color).
+
+    higher_is_better=True default (vault metrics: density/giant alti = bene).
+    """
+    return _gauge_unified(val, lo, hi, w, higher_is_better=higher_is_better)
 
 
 def render_graph(
@@ -132,7 +130,7 @@ def render_graph(
     d_bar, d_col  = _gauge(density,    _ND_LOW, _ND_HIGH)
     c_bar, c_col  = _gauge(clustering, 0.0, 0.35)
     g_bar, g_col  = _gauge(giant,      0.3, 0.9)
-    o_bar, o_col  = _gauge(1 - orphan_ratio, 0.3, 0.9)  # inverse: more connected = better
+    # NB: orphan_ratio non viene reso come bar — entra solo nel nd_score.
 
     nd_score = int((
         (density / _ND_HIGH) * 0.30 +
@@ -167,11 +165,13 @@ def render_graph(
         label = name[:26]
         bar26 = _bar(in_d, max_ind, 22, color)
         bet_str = f"[{ORANGE}]{bet:.3f}[/]" if bet > 0.01 else f"[{DIM}]{bet:.3f}[/]"
+        # Numeri tipo identico (in/out degree) → entrambi right-aligned per
+        # leggibilità colonnare (sess.1508 audit fix).
         return (
             f"  [{color}]{glyph}[/] [{color}]{label:<26}[/] "
             f"{bar26} "
             f"[{DIM}]↑[/][bold {color}]{in_d:>4}[/]"
-            f"[{DIM}] ↓{out_d:<3}[/]  "
+            f"[{DIM}] ↓{out_d:>3}[/]  "
             f"[{DIM}]btw[/] {bet_str}"
         )
 

@@ -122,10 +122,12 @@ BAR8  = ' ▏▎▍▌▋▊▉█'   # 9-step smooth fill
 SPARK = ' ▁▂▃▄▅▆▇█'   # 9-step sparkline
 
 HEAT_MAP = [           # (char, color) by intensity 0-7
-    ('·',  DIM),   ('░', DIM),
-    ('▒',  CYAN),  ('▒', TEAL),
-    ('▓',  YELLOW),('▓', SCAR),
-    ('█',  RED),   ('█', MAG),
+    # 8 glyph percettivamente distinti — sess.1508 audit fix:
+    # prima `▒` e `▓` apparivano due volte con colori diversi → ambiguità.
+    ('·',  DIM),    ('░', DIM),
+    ('▒',  CYAN),   ('▓', TEAL),
+    ('▚',  YELLOW), ('▞', SCAR),
+    ('▣',  RED),    ('█', MAG),
 ]
 
 TREND_WINDOW = 6
@@ -176,11 +178,20 @@ def stacked_bar(segments: list[tuple[int, str]], total: int, w: int = 38) -> str
 
 
 def sparkline(data: deque[float], w: int = 50) -> str:
+    """Sparkline normalize **min-max** (sess.1508 audit fix).
+
+    Versione plain (no markup), back-compat con call site esistenti.
+    Per la versione con color markup vedi polpo_charts.sparkline.
+    """
     vals = list(data)[-w:]
     if not vals:
         return '░' * w
-    mx = max(max(vals), 0.01)
-    return ''.join(SPARK[min(8, int(v / mx * 8.99))] for v in vals)
+    vmin, vmax = min(vals), max(vals)
+    rng = vmax - vmin
+    n = len(SPARK) - 1   # 8
+    if rng < 1e-9:
+        return SPARK[n // 2] * len(vals)
+    return ''.join(SPARK[min(n, int((v - vmin) / rng * n))] for v in vals)
 
 
 def heat(v: float) -> tuple[str, str]:
@@ -207,6 +218,20 @@ def p_pct(vals: list[float], p: float) -> float:
 
 def gb(n: int) -> str:
     return f"{n / 1024 ** 3:.1f}G"
+
+
+def trunc(s: str, n: int) -> str:
+    """Tronca con ellipsis Unicode (…) — sess.1508 audit fix.
+
+    Sostituisce gli `s[:N]` muti che producevano "supabase-postgres-mcp-ser".
+    """
+    if n <= 0:
+        return ""
+    if len(s) <= n:
+        return s
+    if n == 1:
+        return "…"
+    return s[: n - 1] + "…"
 
 
 def health_score(cpu: float, ram: float, load: float) -> tuple[int, str]:
@@ -318,22 +343,15 @@ def render_mem(m: dict, history: deque[float], cpu_avg: float, load: float) -> s
 
 
 def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str:
-    """Temporal heatmap — M5 fingerprint with time axis."""
+    """Temporal heatmap — M5 fingerprint with time axis.
+
+    sess.1508 audit fix: rimosso codice morto duplicato (axis costruito due
+    volte) e legenda allineata con i nuovi 8 glyph distinti.
+    """
     tick_every = 10   # mark every 10 cols = 20 s
     total_secs = cols * 2
 
-    # Build time axis
-    axis = ' ' * 6
-    for i in range(cols):
-        secs_ago = (cols - i) * 2
-        if secs_ago % 20 == 0 and secs_ago != 0:
-            label = f'{secs_ago}s'
-            axis += label + ' ' * (tick_every - len(label))
-        elif i % tick_every == 0:
-            axis += '│' + ' ' * (tick_every - 1)
-        else:
-            pass  # handled above
-    # Simpler: just mark every 10 cols
+    # Time axis — single pass
     axis_chars = list(' ' * (cols + 6))
     for i in range(0, cols, tick_every):
         secs_ago = (cols - i) * 2
@@ -346,7 +364,8 @@ def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str
     lines = [
         "",
         f"[bold {ORANGE}]🔥 CPU HEATMAP[/]  [{DIM}]Δt=2s · window={total_secs}s[/]  "
-        f"[{DIM}]░[/]<25  [{CYAN}]▒[/]25-50  [{YELLOW}]▓[/]50-75  [{HOT_PINK}]█[/]>75",
+        f"[{DIM}]·░[/]<25  [{CYAN}]▒[/][{TEAL}]▓[/]25-50  "
+        f"[{YELLOW}]▚[/][{SCAR}]▞[/]50-75  [{RED}]▣[/][{MAG}]█[/]>75",
         f"[italic {DIM}]The memory of work, rendered as heat — time scrolls left, intensity blooms hot.[/]",
         "",
         f"[{DIM}]{axis_str}[/]  [{DIM}]avg[/]",
@@ -360,7 +379,7 @@ def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str
         pad = cols - len(vals)
         pad_str = f'[{DIM}]{" " * pad}[/]' if pad > 0 else ''
         avg = mean(vals) if vals else 0
-        lines.append(f"  [{SOFT_GREEN}]S{i}[/] {pad_str}{cells}  [bold {_c(avg)}]{avg:3.0f}%[/]")
+        lines.append(f"  [{SOFT_GREEN}]S{i}[/] {pad_str}{cells}  [bold {_c(avg)}]{avg:4.1f}%[/]")
 
     lines += ["", f"  [{DEEP_PURPL}]🚀 P-CORES[/] [{DIM}](performance)[/]"]
 
@@ -371,7 +390,7 @@ def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str
         pad = cols - len(vals)
         pad_str = f'[{DIM}]{" " * pad}[/]' if pad > 0 else ''
         avg = mean(vals) if vals else 0
-        lines.append(f"  [{DEEP_PURPL}]P{i:02d}[/] {pad_str}{cells}  [bold {_c(avg)}]{avg:3.0f}%[/]")
+        lines.append(f"  [{DEEP_PURPL}]P{i:02d}[/] {pad_str}{cells}  [bold {_c(avg)}]{avg:4.1f}%[/]")
 
     return "\n".join(lines)
 
@@ -677,10 +696,7 @@ def render_voice(vd: dict, level_w: int = 40) -> str:
         else:
             ts_str = f"[{DIM}]{int(age/3600)}h fa[/]"
             bg = BG
-        text = entry["text"]
-        if len(text) > 52:
-            text = text[:50] + "…"
-        trans_lines.append(f"  {ts_str}  [{FG}]{text}[/]")
+        trans_lines.append(f"  {ts_str}  [{FG}]{trunc(entry['text'], 52)}[/]")
 
     n_total = len(history)
 
@@ -727,9 +743,13 @@ def render_voice(vd: dict, level_w: int = 40) -> str:
 
 
 def render_feed(feed: deque) -> str:
-    """Unified event feed — timestamped system transitions."""
+    """Unified event feed — timestamped system transitions.
+
+    sess.1508 audit fix: empty state standardizzato (icona + msg) — coerente
+    con kpi_widget / graph_widget.
+    """
     if not feed:
-        return f"\n  [{DIM}]no events yet…[/]"
+        return f"\n  [{DIM}]🔄 in attesa di eventi…[/]\n  [{DIM}]   transizioni: pressure · swap · CPU spike · voice · MRR[/]"
     lines = [""]
     for line in feed:
         lines.append(f"  {line}")
@@ -977,9 +997,9 @@ def render_sentinel(data: dict) -> tuple[str, str]:
         ts = ts_raw[11:19] if len(ts_raw) >= 19 else ts_raw[:19]
         tl = ev.get("threat_level", 0)
         col = level_color.get(tl, DIM)
-        atype = ev.get("alert_type", "?")[:14]
-        desc  = ev.get("desc", "")[:62]
-        tool  = ev.get("tool", "")[:18]
+        atype = trunc(ev.get("alert_type", "?"), 14)
+        desc  = trunc(ev.get("desc", ""), 62)
+        tool  = trunc(ev.get("tool", ""), 18)
         alines.append(
             f"  [{DIM}]{ts}[/] [{col}]L{tl}[/] [{DIM}]{atype:14s}[/] [{col}]{desc}[/]\n"
             f"  [{DIM}]{'':>9}  tool:{tool}[/]"
@@ -1000,15 +1020,18 @@ class TitleBar(Static):
 
     DEFAULT_CSS = f"""
     TitleBar {{
-        height: 15;
+        height: auto;
+        min-height: 6;
         background: {BG};
         padding: 1 3;
         color: {FG};
         border-bottom: heavy {TEAL};
         text-align: center;
-        content-align: center middle;
     }}
     """
+    # NB: height ora dinamica via on_resize → styles.height (6/8/15) — sess.1508
+    # audit fix: prima collideva con `height: 15` fisso e clippava ASCII banner.
+    # `content-align: center middle` rimosso (no-op con height==content).
 
     TITLE_TEXT = "M5 MAX WATCHER"
     EMOJI      = "🐙"
@@ -1019,6 +1042,7 @@ class TitleBar(Static):
     show_ascii: reactive[bool]  = reactive(True)
 
     def on_mount(self) -> None:
+        self._last_static_lines: tuple[str, str, str, str] | None = None
         self.set_interval(RAINBOW_FPS_DT, self._tick)
         self._repaint()
 
@@ -1027,15 +1051,22 @@ class TitleBar(Static):
         self.phase = round((self.phase + RAINBOW_SPEED) % 1.0, RAINBOW_PHASE_Q)
 
     def watch_phase(self, _new: float) -> None:
+        # sess.1508 audit fix: phase tick (4fps) ridipinge SOLO il rainbow,
+        # le line2/3/4 (status/rich) sono gestite da watch_status/rich_info
+        # (≤0.5fps). Prima ogni tick rainbow forzava update completo →
+        # banding/desync visibile su ASCII vs status line.
         self._repaint()
 
     def watch_status(self, _new: str) -> None:
+        self._last_static_lines = None   # invalidate cache → next repaint pulls fresh
         self._repaint()
 
     def watch_rich_info(self, _new: dict) -> None:
+        self._last_static_lines = None
         self._repaint()
 
     def watch_show_ascii(self, _new: bool) -> None:
+        self._last_static_lines = None
         self._repaint()
 
     def _repaint(self) -> None:
@@ -1098,28 +1129,33 @@ class TitleBar(Static):
 class TriageScreen(ModalScreen):
     """Overlay advisor: classifica processi Polpo in KILL_SAFE / CAUTIOUS / KEEP."""
 
-    DEFAULT_CSS = """
-    TriageScreen {
+    DEFAULT_CSS = f"""
+    TriageScreen {{
         align: center middle;
-    }
-    #triage-outer {
+        background: rgba(10, 15, 26, 0.75);
+    }}
+    #triage-outer {{
         width: 96%;
         height: 88%;
-        border: thick $accent;
-        background: $surface;
+        border: thick {TEAL};
+        background: {BG_ALT};
         padding: 1 3;
-    }
-    #triage-title {
+    }}
+    #triage-title {{
         text-align: center;
         margin-bottom: 1;
-    }
-    #triage-hint {
-        height: 1;
-        color: $text-muted;
+    }}
+    #triage-hint {{
+        height: auto;
+        color: {DIM};
         text-align: center;
         margin-top: 1;
-    }
+    }}
     """
+    # sess.1508 audit fix:
+    # - $accent/$surface/$text-muted (Textual vars) → hex tokens Polpo (palette uniforme)
+    # - height: 1 → auto (hint wrappa quando lungo)
+    # - aggiunto background semi-trasparente al modal screen = dim overlay backdrop
 
     BINDINGS = [
         Binding("escape,q", "dismiss",      "Chiudi",   show=True),
@@ -1127,15 +1163,22 @@ class TriageScreen(ModalScreen):
         Binding("r",        "do_refresh",   "Refresh",  show=True),
     ]
 
+    # Semantic color allineata a UX standard (rosso = stop/non toccare, verde = ok)
+    # sess.1508 audit fix: prima rosso = SAFE-to-kill, anti-intuitivo.
     _BUCKET_COLOR = {
-        ds.BUCKET_SAFE:     "bold red",
-        ds.BUCKET_CAUTIOUS: "bold yellow",
-        ds.BUCKET_KEEP:     "bold green",
+        ds.BUCKET_SAFE:     f"bold {LIME}",        # ✓ uccidibile in sicurezza → verde
+        ds.BUCKET_CAUTIOUS: f"bold {YELLOW}",      # ⚠ attenzione → giallo
+        ds.BUCKET_KEEP:     f"bold {RED}",         # ⛔ non toccare → rosso
     }
     _BUCKET_SHORT = {
         ds.BUCKET_SAFE:     "SAFE",
         ds.BUCKET_CAUTIOUS: "CAUTIOUS",
         ds.BUCKET_KEEP:     "KEEP",
+    }
+    _BUCKET_EMOJI = {
+        ds.BUCKET_SAFE:     "🟢",
+        ds.BUCKET_CAUTIOUS: "🟡",
+        ds.BUCKET_KEEP:     "🔴",
     }
 
     def compose(self) -> ComposeResult:
@@ -1164,26 +1207,28 @@ class TriageScreen(ModalScreen):
         n_keep = sum(1 for p in procs if p['bucket'] == ds.BUCKET_KEEP)
 
         self.query_one("#triage-title").update(
-            f"[bold]🔴 SAFE ×{n_safe}[/]   "
-            f"[bold yellow]🟡 CAUTIOUS ×{n_caut}[/]   "
-            f"[bold green]🟢 KEEP ×{n_keep}[/]   "
-            f"[dim]· {len(procs)} proc Polpo[/]"
+            f"[bold {LIME}]🟢 SAFE ×{n_safe}[/]   "
+            f"[bold {YELLOW}]🟡 CAUTIOUS ×{n_caut}[/]   "
+            f"[bold {RED}]🔴 KEEP ×{n_keep}[/]   "
+            f"[{DIM}]· {len(procs)} proc Polpo[/]"
         )
         self.query_one("#triage-hint").update(
-            "[dim]k[/] kill  ·  [dim]r[/] refresh  ·  [dim]esc[/] chiudi  "
-            "·  SAFE = orfani/zombie  ·  CAUTIOUS = attenzione  ·  KEEP = non toccare"
+            f"[{DIM}]k[/] kill  ·  [{DIM}]r[/] refresh  ·  [{DIM}]esc[/] chiudi  "
+            f"·  [{LIME}]SAFE[/] = orfani/zombie  ·  [{YELLOW}]CAUTIOUS[/] = attenzione  "
+            f"·  [{RED}]KEEP[/] = non toccare"
         )
 
         for proc in procs:
-            color = self._BUCKET_COLOR.get(proc['bucket'], 'dim')
+            color = self._BUCKET_COLOR.get(proc['bucket'], DIM)
             short = self._BUCKET_SHORT.get(proc['bucket'], proc['bucket'])
+            emoji = self._BUCKET_EMOJI.get(proc['bucket'], '·')
             t.add_row(
-                f"[{color}]{short}[/]",
+                f"[{color}]{emoji} {short}[/]",
                 str(proc['pid']),
-                proc['label'][:24],
+                trunc(proc['label'], 24),
                 f"{proc['mem_mb']:.0f}",
                 f"{proc['cpu']:.1f}",
-                proc['reason'][:56],
+                trunc(proc['reason'], 56),
                 key=str(proc['pid']),
             )
 
@@ -1274,8 +1319,10 @@ class M5Watcher(App):
         border-title-color: {MAG};
         border-title-style: bold;
         height: 1fr;
-        margin-bottom: 1;
     }}
+    /* sess.1508 audit fix: rimosso `margin-bottom: 1` che creava asimmetria
+       con #feed-panel (margin: 0); Vertical container gestisce gap via
+       `1fr + 1fr` di mem-panel/feed-panel senza margin esplicito. */
     #mem-col {{
         width: 1fr;
         layout: vertical;
@@ -1314,9 +1361,9 @@ class M5Watcher(App):
         min-width: 0;
         align-horizontal: center;
     }}
-    Tabs > #tabs-scroll {{
-        align-horizontal: center;
-    }}
+    /* sess.1508 audit fix: rimosso `Tabs > #tabs-scroll` — selettore non
+       esiste in Textual 8.x. Centering è gestito programmaticamente da
+       _center_tabs() via styles.padding (vedi M5Watcher._center_tabs). */
     Tab {{
         color: {DIM};
         background: {BG};
@@ -1344,12 +1391,13 @@ class M5Watcher(App):
         height: 1fr;
     }}
     #heat-static {{
-        width: 53%;
+        width: 1fr;
         background: {BG_ALT};
         border: heavy {TEAL};
         padding: 1 3;
         height: 1fr;
-        overflow: hidden hidden;
+        overflow-x: hidden;
+        overflow-y: hidden;
     }}
     #analytics-static {{
         background: {BG_ALT};
@@ -1358,13 +1406,16 @@ class M5Watcher(App):
         height: 1fr;
     }}
     #voice-static {{
-        width: 47%;
+        width: 1fr;
         background: {BG_ALT};
         border: heavy {HOT_PINK};
         border-title-color: {HOT_PINK};
         padding: 1 3;
         height: 1fr;
     }}
+    /* sess.1508 audit fix: 53% + 47% sommavano 100% senza tener conto di
+       border heavy (2) + padding 1 3 (6) per pannello → overflow garantito
+       <140 cols. Ora 1fr + 1fr lascia il flex layout gestire margini. */
     DataTable {{
         background: {BG_ALT};
         height: 1fr;
@@ -1424,7 +1475,8 @@ class M5Watcher(App):
         border: heavy {ELEC_BLUE};
         padding: 1 3;
         height: 1fr;
-        overflow: hidden hidden;
+        overflow-x: hidden;
+        overflow-y: hidden;
     }}
     #tent-box {{
         background: {BG_ALT};
@@ -1442,21 +1494,25 @@ class M5Watcher(App):
     }}
     """
 
+    # sess.1508 audit fix: keybinding numerici/k/f ora visibili nel Footer
+    # (prima `show=False` rendeva il sistema invisibile a chi non aveva
+    # memoria muscolare). Tab key labels accorciate (1-8 con label inline).
     BINDINGS = [
         Binding("q",   "quit",           "Quit"),
-        Binding("r",   "force_refresh",  "Refresh"),
-        Binding("p",   "toggle_pause",   "Pause"),
-        Binding("1",   "show_tab_heat",  "Heatmap",   show=False),
-        Binding("2",   "show_tab_stats", "Analytics", show=False),
-        Binding("3",   "show_tab_procs", "Processes", show=False),
-        Binding("4",   "show_tab_tent",  "Tentacoli", show=False),
-        Binding("5",   "show_tab_graph", "Graph",     show=False),
-        Binding("6",   "show_tab_kpi",   "KPI",       show=False),
-        Binding("7",   "show_tab_logs",  "Logs",      show=False),
-        Binding("8",   "show_tab_sent",  "Sentinel",  show=False),
-        Binding("f",   "cycle_graph_filter", "Filter",  show=False),
+        Binding("r",   "force_refresh",  "↻"),
+        Binding("p",   "toggle_pause",   "⏸ Pause"),
+        Binding("1",   "show_tab_heat",  "1🌡",       show=True),
+        Binding("2",   "show_tab_stats", "2📈",       show=True),
+        Binding("3",   "show_tab_procs", "3🔝",       show=True),
+        Binding("4",   "show_tab_tent",  "4🐙",       show=True),
+        Binding("5",   "show_tab_graph", "5🕸",       show=True),
+        Binding("6",   "show_tab_kpi",   "6📊",       show=True),
+        Binding("7",   "show_tab_logs",  "7📋",       show=True),
+        Binding("8",   "show_tab_sent",  "8🛡",       show=True),
+        Binding("f",   "cycle_graph_filter", "Filter",  show=True),
         Binding("c",   "triage",             "Triage",  show=True),
-        Binding("k",   "kill_tent_selected", "🗑 Kill",  show=False),
+        Binding("k",   "kill_tent_selected", "Kill",    show=True),
+        Binding("?",   "show_help",          "Help",    show=True),
     ]
 
     def __init__(self):
@@ -1493,6 +1549,10 @@ class M5Watcher(App):
         # Responsive layout — updated on terminal resize
         self._cols: int = 120
         self._rows: int = 40
+        # sess.1508 audit fix: cache last-rendered widget content per evitare
+        # Static.update() inutili quando il contenuto non cambia (era il caso
+        # del feed-static aggiornato ogni 2s anche con deque immutata).
+        self._feed_last_render: str = ""
 
     # ── Layout ────────────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -1564,16 +1624,18 @@ class M5Watcher(App):
 
     # ── Responsive helpers ────────────────────────────────────────────────────
     def _heatmap_cols(self) -> int:
-        # 53% widget, border=2, padding=6, row overhead "  P00 " (6) + "  100%" (6) = 14 + 6 margins
-        return max(20, int(self._cols * 0.53) - 20)
+        # heat-static = 1fr (50% in flex 2-figli) — sess.1508 audit fix:
+        # border=2 + padding=6 = 8 char chrome; row overhead "  P00 " (6) + "  100%" (6) = 12.
+        # Subtract 22 totali per safety contro Berkeley Mono cell-width drift su emoji.
+        return max(20, int(self._cols * 0.50) - 22)
 
     def _spark_width(self) -> int:
         """Sparkline width for analytics tab — full-width panel minus labels."""
         return max(20, self._cols - 24)
 
     def _voice_width(self) -> int:
-        """Level bar width for voice panel — 47% panel minus padding/prefix."""
-        return max(20, int(self._cols * 0.45) - 12)
+        """Level bar width for voice panel — 1fr (50%) panel minus padding/prefix."""
+        return max(20, int(self._cols * 0.50) - 14)
 
     def _center_tabs(self) -> None:
         """Center the tab bar by computing padding-left from terminal width and tab content width.
@@ -1707,8 +1769,11 @@ class M5Watcher(App):
             else:
                 self._event_feed.appendleft(f"[{DIM}]{ts}[/] 🎙 [{LIME}]Jarvis live[/] [{DIM}]{new_voice}[/]")
         self._prev_voice_state = new_voice
-        # ── Feed widget: single update per fast-cycle (CPU spike appended above)
-        self.query_one("#feed-static", Static).update(_UNIFEED_HDR + render_feed(self._event_feed))
+        # ── Feed widget: skip update se invariato (sess.1508 audit fix).
+        feed_str = _UNIFEED_HDR + render_feed(self._event_feed)
+        if feed_str != self._feed_last_render:
+            self.query_one("#feed-static", Static).update(feed_str)
+            self._feed_last_render = feed_str
         self._update_subtitle(overall, la1)
 
     async def _refresh_slow(self) -> None:
@@ -1778,9 +1843,10 @@ class M5Watcher(App):
         self._prev_mrr      = new_mrr
         self._prev_pipeline = new_pipeline
 
-        self.query_one("#feed-static", Static).update(
-            _UNIFEED_HDR + render_feed(self._event_feed)
-        )
+        feed_str = _UNIFEED_HDR + render_feed(self._event_feed)
+        if feed_str != self._feed_last_render:
+            self.query_one("#feed-static", Static).update(feed_str)
+            self._feed_last_render = feed_str
 
         cpu_avg = mean(self._cpu_percents) if self._cpu_percents else 0
         la1, _, _ = ds.load_avg()
@@ -1835,9 +1901,9 @@ class M5Watcher(App):
             lt.add_row(
                 f"[{DIM}]{e['ts']}[/]",
                 f"{new_badge} {e['emoji']}",
-                e['title'][:36],
+                trunc(e['title'], 36),
                 f"[{src_col}]{e['source']}[/]",
-                f"[{DIM}]{e['desc'][:60]}[/]",
+                f"[{DIM}]{trunc(e['desc'], 60)}[/]",
             )
 
     async def _update_processes(self) -> None:
@@ -1937,6 +2003,14 @@ class M5Watcher(App):
 
     def action_toggle_pause(self) -> None:
         self._paused = not self._paused
+        # sess.1508 audit fix: feedback visivo prominente — border TitleBar
+        # passa a ORANGE quando paused (prima il segnale era solo nel testo
+        # status, troncabile a 80 cols).
+        try:
+            tb = self.query_one("#title-bar", TitleBar)
+            tb.styles.border_bottom = ("heavy", ORANGE if self._paused else TEAL)
+        except Exception:
+            pass
         if self._paused:
             self.notify(
                 f"⏸  Paused at {time.strftime('%H:%M:%S')}  ·  tick #{self._tick}",
@@ -1998,6 +2072,15 @@ class M5Watcher(App):
 
     def action_triage(self) -> None:
         self.push_screen(TriageScreen())
+
+    def action_show_help(self) -> None:
+        """Cheat sheet keybinding (sess.1508 audit fix: discoverability)."""
+        self.notify(
+            "🐙 KEYS · q quit · r refresh · p pause · 1-8 tabs · "
+            "f filter graph · c triage · k kill tentacolo selezionato",
+            severity="information",
+            timeout=8.0,
+        )
 
     def action_kill_tent_selected(self) -> None:
         import signal as _sig

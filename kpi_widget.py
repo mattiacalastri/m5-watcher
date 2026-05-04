@@ -5,24 +5,18 @@ dashboard: MRR gauge, Outstanding bar, Pipeline bar + PI section (Lead Caldi · 
 TTL-cached (30s). Safe for asyncio.to_thread.
 
 Pattern mirrors graph_widget.py — no imports from app.py.
+Tutte le primitive grafiche vivono in polpo_charts.py (sess.1508 audit).
 """
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
-_P         = json.loads((Path(__file__).parent / "polpo.tokens.json").read_text())["palette"]
-TEAL       = _P["polpo_teal"]
-DIM        = _P["polpo_dim"]
-FG         = _P["polpo_fg"]
-WHITE      = "#ffffff"
-LIME       = "#a8ff60"
-HOT_PINK   = "#ff2d92"
-ELEC_BLUE  = "#00e5ff"
-ORANGE     = "#ff8a3d"
-DEEP_PURPL = "#9d4dff"
-SOFT_GREEN = "#5dffaa"
+from polpo_charts import (
+    DIM, TEAL, WHITE,
+    HOT_PINK, ELEC_BLUE, LIME, ORANGE,
+    proportional_bar, eur_full, empty_state,
+)
 
 _KPI_PATH = (
     Path.home()
@@ -37,6 +31,8 @@ _CACHE_TTL             = 30.0
 _TARGET_MRR  = 10_000.0
 _TARGET_CASH = 10_000.0
 _TARGET_PIPE = 20_000.0
+_COLD_GOAL   = 30.0   # gg target media inattività
+_COLD_LIMIT  = 90.0   # gg soglia lead stale
 
 
 def read_kpi_data() -> dict:
@@ -68,22 +64,28 @@ def read_kpi_data() -> dict:
 
 
 def _bar(pct: float, w: int = 28, color: str = LIME) -> str:
-    filled = min(w, max(0, round(pct / 100 * w)))
-    return f'[{color}]{"█" * filled}[/][{DIM}]{"░" * (w - filled)}[/]'
+    """Compat shim: pct_bar via proportional_bar with total=100."""
+    return proportional_bar(pct, 100.0, w, color)
 
 
-def _eur(v: float) -> str:
-    return f"€{int(v):,}".replace(',', '.')
+def _cold_color(cold_avg: float) -> str:
+    """Allineata sulla scala 0/30/60/90 (= cold_pct). Sess.1508 audit fix."""
+    if cold_avg >= _COLD_LIMIT * 2 / 3:   # ≥ 60gg
+        return HOT_PINK
+    if cold_avg >= _COLD_GOAL:            # ≥ 30gg
+        return ORANGE
+    return LIME
 
 
 def render_kpi(kpi: dict, w: int = 28) -> str:
     """Render business KPI panel as Rich markup string."""
     if not kpi:
-        return f"[{DIM}]🔄 Leggendo KPI.md dal vault…[/]"
+        return empty_state("🔄", "Leggendo KPI.md dal vault…", "TTL 30s · prima esecuzione ~1s")
 
     mrr       = float(kpi.get('mrr',               0))
     mrr_prev  = float(kpi.get('mrr_previous',      mrr))
     outstand  = float(kpi.get('outstanding',        0))
+    debtors   = kpi.get('outstanding_debtors')           # ⬅ no più hardcoded "4"
     pipeline  = float(kpi.get('pipeline_weighted',  0))
     tot_leads = float(kpi.get('setter_total_leads', 0))
     active    = float(kpi.get('setter_active',      0))
@@ -91,17 +93,26 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
     updated   = kpi.get('updated', '—')
 
     delta       = mrr - mrr_prev
-    delta_s     = ('+' if delta >= 0 else '') + _eur(delta)
+    delta_s     = ('+' if delta >= 0 else '') + eur_full(delta)
     delta_color = LIME if delta >= 0 else HOT_PINK
     mrr_pct     = min(mrr      / _TARGET_MRR  * 100, 100)
     out_pct     = min(outstand / _TARGET_CASH * 100, 100)
     pipe_pct    = min(pipeline / _TARGET_PIPE * 100, 100)
     conv_pct    = min((active  / tot_leads    * 100) if tot_leads > 0 else 0, 100)
     cold        = max(0.0, tot_leads - active)
-    cold_pct    = min(cold_avg / 90.0 * 100, 100)   # 90 gg = soglia lead stale
-    cold_color  = HOT_PINK if cold_avg > 60 else (ORANGE if cold_avg > 30 else LIME)
+    cold_pct    = min(cold_avg / _COLD_LIMIT * 100, 100)
+    cold_color  = _cold_color(cold_avg)
 
-    # Layout: "  EMOJI label(14)  bar  value" — sub-line indented 20 cols to align
+    # Outstanding sub-line: numero debitori dinamico, fallback a stringa neutra
+    if debtors is None:
+        out_sub = "da incassare"
+    else:
+        try:
+            n = int(float(debtors))
+            out_sub = f"da incassare · {n} debitor{'i attivi' if n != 1 else 'e attivo'}"
+        except (TypeError, ValueError):
+            out_sub = "da incassare"
+
     def row(emoji: str, ec: str, label: str, pct: float, bc: str,
             value: str, sub: str) -> list[str]:
         b = _bar(pct, w, bc)
@@ -117,20 +128,20 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
     ]
     lines += row(
         "💰", LIME, "MRR", mrr_pct, LIME,
-        _eur(mrr),
-        f"[{delta_color}]{delta_s}[/] [{DIM}]vs prev · goal {_eur(_TARGET_MRR)} · {mrr_pct:.0f}%[/]",
+        eur_full(mrr),
+        f"[{delta_color}]{delta_s}[/] [{DIM}]vs prev · goal {eur_full(_TARGET_MRR)} · {mrr_pct:.0f}%[/]",
     )
     lines.append("")
     lines += row(
         "📌", HOT_PINK, "Outstanding", out_pct, HOT_PINK,
-        _eur(outstand),
-        f"[{DIM}]da incassare · 4 debitori attivi[/]",
+        eur_full(outstand),
+        f"[{DIM}]{out_sub}[/]",
     )
     lines.append("")
     lines += row(
         "🎯", ELEC_BLUE, "Pipeline", pipe_pct, ELEC_BLUE,
-        _eur(pipeline),
-        f"[{DIM}]weighted · goal {_eur(_TARGET_PIPE)} · {pipe_pct:.0f}%[/]",
+        eur_full(pipeline),
+        f"[{DIM}]weighted · goal {eur_full(_TARGET_PIPE)} · {pipe_pct:.0f}%[/]",
     )
     lines.append("")
     lines.append(f"  [{DIM}]── PI  Pipeline Indicators  ·  setter · lead commerciali ──────────[/]")
@@ -144,6 +155,6 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
     lines += row(
         "🕐", cold_color, "Cold Avg", cold_pct, cold_color,
         f"{cold_avg:.1f} gg",
-        f"[{DIM}]media gg inattività per lead freddo · goal < 30 gg[/]",
+        f"[{DIM}]media gg inattività per lead freddo · goal < {int(_COLD_GOAL)} gg[/]",
     )
     return "\n".join(lines)

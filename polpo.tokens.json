@@ -20,6 +20,25 @@
     "polpo_scar":      "#ff8800"
   },
 
+  "energy_palette": {
+    "hot_pink":    "#ff2d92",
+    "elec_blue":   "#00e5ff",
+    "lime":        "#a8ff60",
+    "orange":      "#ff8a3d",
+    "deep_purple": "#9d4dff",
+    "soft_green":  "#5dffaa",
+    "yellow":      "#ffd400",
+    "white":       "#ffffff"
+  },
+
+  "chart_glyphs": {
+    "spark9":   " ▁▂▃▄▅▆▇█",
+    "bar8":     " ▏▎▍▌▋▊▉█",
+    "bar2":     "█░",
+    "heatmap8": "·░▒▓▚▞▣█",
+    "ellipsis": "…"
+  },
+
   "semantic": {
     "accent_primary":  "polpo_teal",
     "status_ok":       "polpo_green",

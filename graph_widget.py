@@ -13,6 +13,7 @@ import networkx as nx
 from polpo_charts import (
     TEAL, DIM, FG, WHITE,
     HOT_PINK, ELEC_BLUE, LIME, ORANGE, DEEP_PURPL, SOFT_GREEN, ENERGY_YEL,
+    PRESSURE_COLOR, PRESSURE_EMOJI,
     sparkline as _spark_unified,
     pct_bar as _pct_bar_unified,
     proportional_bar,
@@ -345,11 +346,9 @@ def render_graph(
         inactive   = mem.get('inactive', 0)
         compressed = mem.get('compressed', 0)
         prs_label, prs_key = mem.get('pressure', ('—', 'ok'))
-        prs_col  = {
-            'ok': LIME, 'info': ELEC_BLUE,
-            'warning': ORANGE, 'error': HOT_PINK,
-        }.get(prs_key, DIM)
-        prs_emoji = {'ok': '🟢', 'info': '🔵', 'warning': '🟡', 'error': '🔴'}.get(prs_key, '⚪')
+        # sess.1508 round 3: pressure dict unificati in polpo_charts.
+        prs_col  = PRESSURE_COLOR.get(prs_key, DIM)
+        prs_emoji = PRESSURE_EMOJI.get(prs_key, '⚪')
         swap_col = HOT_PINK if swap > 0.5e9 else (ORANGE if swap > 0 else DIM)
         mem_col  = _pct_color(pct)
         spark_w  = max(20, w - 14)

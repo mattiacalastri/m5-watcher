@@ -4,10 +4,14 @@ Estratto da app.py / kpi_widget.py / graph_widget.py per evitare drift tra
 3 alfabeti sparkline e 3 algoritmi normalize incoerenti (audit sess.1508).
 
 Tutto legge da polpo.tokens.json — niente hardcoded hex qui dentro.
+
+Round 3 (sess.1508): __all__ esplicito, PRESSURE_* hoisted, color-blind
+viridis-style ramp, contrast-safe DIM (WCAG AA pass su BG).
 """
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -15,6 +19,24 @@ _TOKENS    = json.loads((Path(__file__).parent / "polpo.tokens.json").read_text(
 _PALETTE   = _TOKENS["palette"]
 _ENERGY    = _TOKENS["energy_palette"]
 _GLYPHS    = _TOKENS["chart_glyphs"]
+
+__all__ = [
+    # Palette canonica
+    "TEAL", "DIM", "FG", "BG", "BG_ALT", "RED", "SCAR", "MAGENTA",
+    "GREEN", "CYAN", "YELLOW",
+    # Energy palette
+    "HOT_PINK", "ELEC_BLUE", "LIME", "ORANGE", "DEEP_PURPL",
+    "SOFT_GREEN", "WHITE", "ENERGY_YEL",
+    # Chart glyphs
+    "SPARK9", "BAR8", "BAR2", "HEATMAP8", "ELLIPSIS",
+    # Pressure / level dicts (hoisted round 3)
+    "PRESSURE_COLOR", "PRESSURE_EMOJI", "PRESSURE_LABEL", "ALERT_LEVEL_COLOR",
+    # Functions
+    "sparkline", "pct_bar", "subpixel_bar", "proportional_bar",
+    "gauge", "pct_color", "pct_color_cb",
+    "truncate", "eur_compact", "eur_full", "fmt_int_eu", "gb",
+    "empty_state", "high_contrast_mode",
+]
 
 # ── Palette canonica ─────────────────────────────────────────────────────────
 TEAL       = _PALETTE["polpo_teal"]
@@ -45,6 +67,45 @@ BAR8       = _GLYPHS["bar8"]      # ' ▏▎▍▌▋▊▉█' — 8 step subpi
 BAR2       = _GLYPHS["bar2"]      # '█░' — discreto, alta densità
 HEATMAP8   = _GLYPHS["heatmap8"]  # '·░▒▓▚▞▣█' — 8 livelli percettivamente distinti
 ELLIPSIS   = _GLYPHS["ellipsis"]
+
+
+# ── Pressure dicts (sess.1508 round 3: hoisted da app.py 3 copie + graph_widget) ──
+PRESSURE_COLOR: dict[str, str] = {
+    "ok":      LIME,
+    "info":    ELEC_BLUE,
+    "warning": ORANGE,
+    "error":   HOT_PINK,
+}
+PRESSURE_EMOJI: dict[str, str] = {
+    "ok":      "🟢",
+    "info":    "🔵",
+    "warning": "🟡",
+    "error":   "🔴",
+}
+PRESSURE_LABEL: dict[str, str] = {
+    "ok":      "NORMAL",
+    "info":    "MODERATE",
+    "warning": "HIGH",
+    "error":   "CRITICAL",
+}
+
+# ── Alert level color (Sentinel: 0..10 threat scale) ─────────────────────────
+ALERT_LEVEL_COLOR: dict[int, str] = {
+    0: LIME, 1: LIME,
+    2: ELEC_BLUE,
+    3: ORANGE, 4: ORANGE,
+    5: HOT_PINK, 6: HOT_PINK, 7: HOT_PINK, 8: HOT_PINK, 9: HOT_PINK,
+    10: WHITE,
+}
+
+
+# ── High-contrast / color-blind mode (sess.1508 round 3) ─────────────────────
+# Set via env M5W_HIGH_CONTRAST=1 oppure --high-contrast CLI flag.
+# Sostituisce la rampa RED→YELLOW→TEAL→GREEN (deutan/protan killer) con una
+# rampa percettivamente uniforme blu→cyano→arancio→giallo (viridis-style).
+def high_contrast_mode() -> bool:
+    """True se l'utente ha richiesto modalità high-contrast / color-blind safe."""
+    return os.environ.get("M5W_HIGH_CONTRAST", "").lower() in ("1", "true", "yes")
 
 
 # ── Sparkline ────────────────────────────────────────────────────────────────
@@ -147,11 +208,29 @@ def gauge(
 
 
 def pct_color(pct: float) -> str:
-    """Color semantico standard per percentuali load (CPU, mem, disk)."""
+    """Color semantico standard per percentuali load (CPU, mem, disk).
+
+    Round 3: switch automatico a `pct_color_cb` (color-blind ramp) se
+    `M5W_HIGH_CONTRAST=1` — viridis-style invece di RED/YELLOW/GREEN.
+    """
+    if high_contrast_mode():
+        return pct_color_cb(pct)
     if pct >= 80: return HOT_PINK
     if pct >= 60: return ORANGE
     if pct >= 40: return ENERGY_YEL
     return LIME
+
+
+def pct_color_cb(pct: float) -> str:
+    """Color-blind safe ramp: blu→ciano→arancio→giallo brillante.
+
+    Stessi soglie di `pct_color`. Distinguibile per deutan/protan (rosso-verde
+    blindness): non usa MAI rosso/verde adiacenti.
+    """
+    if pct >= 80: return ENERGY_YEL    # peak: yellow brillante (alta luminosità)
+    if pct >= 60: return ORANGE        # warm: orange
+    if pct >= 40: return ELEC_BLUE     # active: ciano
+    return DEEP_PURPL                   # idle: viola (saturo, distinguibile)
 
 
 # ── Formatting ───────────────────────────────────────────────────────────────

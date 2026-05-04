@@ -50,14 +50,25 @@ _COLD_GOAL   = 30.0   # gg target media inattività
 _COLD_LIMIT  = 90.0   # gg soglia lead stale
 
 
-def read_kpi_data() -> dict:
-    """Read KPI.md YAML frontmatter. TTL-cached. Safe for asyncio.to_thread."""
+def read_kpi_data(path: Path | None = None) -> dict:
+    """Read KPI.md YAML frontmatter. TTL-cached. Safe for asyncio.to_thread.
+
+    Args:
+        path: override esplicito (utile per test e per config utente).
+              Quando path != None, il TTL cache è bypassato.
+
+    sess.1508 round 3 fix: prima il test_suite chiamava `read_kpi_data(path=...)`
+    ma il param non esisteva → TypeError silente perché il test non era nel
+    groups list runner. Ora API coerente.
+    """
     global _cache, _cache_ts
-    now = time.monotonic()
-    if _cache and now - _cache_ts < _CACHE_TTL:
-        return _cache
+    target = path if path is not None else _KPI_PATH
+    if path is None:
+        now = time.monotonic()
+        if _cache and now - _cache_ts < _CACHE_TTL:
+            return _cache
     try:
-        lines = _KPI_PATH.read_text(encoding="utf-8").splitlines()
+        lines = target.read_text(encoding="utf-8").splitlines()
         in_fm, data = False, {}
         for line in lines:
             if line.strip() == '---':
@@ -72,7 +83,8 @@ def read_kpi_data() -> dict:
                     data[k.strip()] = float(v)
                 except ValueError:
                     data[k.strip()] = v
-        _cache, _cache_ts = data, now
+        if path is None:
+            _cache, _cache_ts = data, time.monotonic()
         return data
     except Exception:
         return {}

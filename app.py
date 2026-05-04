@@ -49,6 +49,7 @@ __pillar__       = "Astra OS · Polpo Cockpit Suite"
 __forged_in__    = "sess.1488"   # Sentinel tab — Cyber Sentinel canary + alerts live view
 __credits__      = ("Polpo Design System", "Textual", "psutil", "Apple Silicon M5 Max")
 
+import argparse
 import asyncio
 import functools
 import itertools
@@ -56,12 +57,14 @@ import json
 import math
 import os
 import re
-import threading
 import time
 from collections import deque
 from colorsys import hsv_to_rgb
 from pathlib import Path
 from statistics import mean
+
+# sess.1508 round 3: rimosso `import threading` (mai usato — concurrency via
+# asyncio.to_thread). Aggiunto `argparse` per CLI flags.
 
 import psutil
 from textual.app import App, ComposeResult
@@ -77,6 +80,7 @@ import data_sources as ds
 import vault_parser
 import graph_widget
 import kpi_widget
+import polpo_charts as pc_const   # sess.1508 round 3: shared constants (PRESSURE_*, ALERT_*)
 
 # ── Design tokens ──────────────────────────────────────────────────────────────
 _TOKENS = json.loads((Path(__file__).parent / "polpo.tokens.json").read_text())
@@ -106,17 +110,37 @@ def health_emoji(s: int) -> str:
     return "❤️"
 
 
-def trend_emoji(data: deque[float]) -> str:
-    """Trend arrow as emoji-glyph for higher visibility."""
+def _trend_signal(data: deque[float]) -> tuple[float, int] | None:
+    """Compute slope + bucket: -2 strong↓, -1 mild↓, 0 flat, +1 mild↑, +2 strong↑.
+
+    Single source of truth — trend_emoji + trend_arrow ora delegano qui
+    (sess.1508 round 3 — prima erano due funzioni con stesse soglie ma
+    glyph e color drift).
+    """
     vals = list(data)[-TREND_WINDOW:]
     if len(vals) < 3:
-        return f'[{DIM}]─[/]'
+        return None
     slope = (vals[-1] - vals[0]) / len(vals)
-    if slope > 4:    return f'[{HOT_PINK}]▲▲[/]'
-    if slope > 1.5:  return f'[{ORANGE}]▲[/]'
-    if slope < -4:   return f'[{LIME}]▼▼[/]'
-    if slope < -1.5: return f'[{SOFT_GREEN}]▼[/]'
-    return f'[{DIM}]●[/]'
+    if slope > 4:    return slope, +2
+    if slope > 1.5:  return slope, +1
+    if slope < -4:   return slope, -2
+    if slope < -1.5: return slope, -1
+    return slope, 0
+
+
+def trend_emoji(data: deque[float]) -> str:
+    """Trend arrow stilizzato (▲▲ / ▲ / ● / ▼ / ▼▼)."""
+    sig = _trend_signal(data)
+    if sig is None:
+        return f'[{DIM}]─[/]'
+    _, bucket = sig
+    return {
+        +2: f'[{HOT_PINK}]▲▲[/]',
+        +1: f'[{ORANGE}]▲[/]',
+         0: f'[{DIM}]●[/]',
+        -1: f'[{SOFT_GREEN}]▼[/]',
+        -2: f'[{LIME}]▼▼[/]',
+    }[bucket]
 
 # ── Visual primitives ──────────────────────────────────────────────────────────
 BAR8  = ' ▏▎▍▌▋▊▉█'   # 9-step smooth fill
@@ -135,18 +159,8 @@ TREND_WINDOW = 6
 N_CORES = ds.E_CORES + ds.P_CORES   # 18
 JARVIS_DIR = Path.home() / ".local" / "run" / "jarvis"
 
-_VOICE_NAMES: dict[str, str] = {
-    "andy":     "Andy M – Italian Male Warm",
-    "bill":     "Bill – Wise, Mature, Balanced",
-    "callum":   "Callum – Husky Trickster",
-    "carlotta": "Carlotta – Fairy Princess",
-    "daniela":  "Daniela – Giovane ed elegante",
-    "george":   "George – Warm, Captivating",
-    "laura":    "Laura – Enthusiast, Quirky",
-    "mary":     "Mary – Confident, Roman",
-    "mimmi":    "Mimmi – Playful Cartoonish",
-    "roger":    "Roger – Laid-Back, Resonant",
-}
+# sess.1508 round 3: rimosso `_VOICE_NAMES` dict — duplicava la lista voci
+# letta a runtime da `voices.json` in `voice_data()`. Single source of truth.
 
 
 def _c(v: float) -> str:
@@ -200,15 +214,18 @@ def heat(v: float) -> tuple[str, str]:
 
 
 def trend_arrow(data: deque[float]) -> str:
-    vals = list(data)[-TREND_WINDOW:]
-    if len(vals) < 3:
+    """Trend ASCII arrow (↑ ↗ ─ ↘ ↓) — sess.1508 round 3 delega a _trend_signal."""
+    sig = _trend_signal(data)
+    if sig is None:
         return f'[{DIM}]─[/]'
-    slope = (vals[-1] - vals[0]) / len(vals)
-    if slope > 4:    return f'[{RED}]↑[/]'
-    if slope > 1.5:  return f'[{YELLOW}]↗[/]'
-    if slope < -4:   return f'[{GREEN}]↓[/]'
-    if slope < -1.5: return f'[{TEAL}]↘[/]'
-    return f'[{DIM}]─[/]'
+    _, bucket = sig
+    return {
+        +2: f'[{RED}]↑[/]',
+        +1: f'[{YELLOW}]↗[/]',
+         0: f'[{DIM}]─[/]',
+        -1: f'[{TEAL}]↘[/]',
+        -2: f'[{GREEN}]↓[/]',
+    }[bucket]
 
 
 def p_pct(vals: list[float], p: float) -> float:
@@ -294,8 +311,9 @@ def render_mem(m: dict, history: deque[float], cpu_avg: float, load: float) -> s
 
     total = m['total']
     prs_label, prs_key = m['pressure']
-    prs_color = {'ok': LIME, 'info': ELEC_BLUE, 'warning': ORANGE, 'error': HOT_PINK}[prs_key]
-    prs_emoji = {'ok': '🟢', 'info': '🔵', 'warning': '🟡', 'error': '🔴'}[prs_key]
+    # sess.1508 round 3: dict pressure unificati in polpo_charts (3 copie eliminate).
+    prs_color = pc_const.PRESSURE_COLOR.get(prs_key, DIM)
+    prs_emoji = pc_const.PRESSURE_EMOJI.get(prs_key, '⚪')
     swap_color = HOT_PINK if m['swap'] > 0.5e9 else (ORANGE if m['swap'] > 0 else DIM)
     swap_emoji = '🔴' if m['swap'] > 0.5e9 else ('🟡' if m['swap'] > 0 else '⚫')
     hs, hc = health_score(cpu_avg, m['pct'], load)
@@ -691,7 +709,7 @@ def render_voice(vd: dict, level_w: int = 40) -> str:
     loop_label = loop_st.title() if loop_st not in ("off", "") else "Manual"
     wave_line  = _level_bar(levels, level_w)
 
-    voice_display = vd.get("voice_full") or _VOICE_NAMES.get(voice.lower(), voice.title())
+    voice_display = vd.get("voice_full") or voice.title()
     voice_star = f"⭐ [bold {ELEC_BLUE}]{voice_display}[/]"
 
     # Transcriptions with relative timestamps
@@ -998,9 +1016,8 @@ def render_sentinel(data: dict) -> tuple[str, str]:
     canary_str = "\n".join(lines)
 
     # ── Alerts box ───────────────────────────────────────────────────────────
-    level_color = {0: LIME, 1: LIME, 2: ELEC_BLUE, 3: ORANGE, 4: ORANGE,
-                   5: HOT_PINK, 6: HOT_PINK, 7: HOT_PINK, 8: HOT_PINK,
-                   9: HOT_PINK, 10: WHITE}
+    # sess.1508 round 3: hoisted in polpo_charts.ALERT_LEVEL_COLOR.
+    level_color = pc_const.ALERT_LEVEL_COLOR
     alines = [
         f"[bold {HOT_PINK}]🚨 RECENT ALERTS[/]  [{DIM}]· security_audit.jsonl (last 30)[/]\n"
         f"[italic {DIM}]Injection · rate-limit · canary trips — immune system event stream.[/]\n",
@@ -1051,14 +1068,17 @@ class TitleBar(Static):
     TITLE_TEXT = "M5 MAX WATCHER"
     EMOJI      = "🐙"
 
-    phase:      reactive[float] = reactive(0.0)
-    status:     reactive[str]   = reactive("")
-    rich_info:  reactive[dict]  = reactive(dict)
+    phase:       reactive[float] = reactive(0.0)
+    status:      reactive[str]   = reactive("")
+    rich_info:   reactive[dict]  = reactive(dict)
     # sess.1508 round 2 hierarchy fix: ASCII banner OFF di default — recupera
     # 7 righe di viewport per info reali (sess/MRR/CPU). Si attiva via
     # on_resize quando il terminale è abbastanza grande (cols>=52, rows>=35)
     # E l'utente non l'ha esplicitamente nascosto.
-    show_ascii: reactive[bool]  = reactive(False)
+    show_ascii:  reactive[bool]  = reactive(False)
+    # sess.1508 round 3 motion: quando True, _tick non avanza phase →
+    # rainbow congelato (sistema idle = app calma).
+    idle_frozen: reactive[bool]  = reactive(False)
 
     def on_mount(self) -> None:
         # sess.1508 round 2 — diff cache reale: tupla (ascii_banner, line1..4)
@@ -1069,6 +1089,10 @@ class TitleBar(Static):
 
     def _tick(self) -> None:
         # sess.1494: quantizza phase → reactive watch dedup + lru_cache hit
+        # sess.1508 round 3: skip tick se --no-rainbow attivo (env M5W_NO_RAINBOW)
+        # sess.1508 round 3 motion: skip tick se idle_frozen (sistema calmo).
+        if os.environ.get("M5W_NO_RAINBOW") == "1" or self.idle_frozen:
+            return
         new_phase = round((self.phase + RAINBOW_SPEED) % 1.0, RAINBOW_PHASE_Q)
         if new_phase != self.phase:
             self.phase = new_phase
@@ -1087,9 +1111,15 @@ class TitleBar(Static):
         self._repaint()
 
     def _repaint(self) -> None:
+        # sess.1508 round 3 motion: ASCII banner ora `wave=False` di default —
+        # il movimento simultaneo hue + luminosity oscillation distraeva
+        # l'occhio dalle line2/3/4 dove vivono i dati reali. Il rainbow-hue
+        # da solo conserva l'identità visiva senza essere invadente.
+        # Wave-on opzionale via env M5W_BANNER_WAVE=1 per chi la ama.
+        wave_on = os.environ.get("M5W_BANNER_WAVE") == "1"
         if self.show_ascii:
             ascii_rows = [
-                rainbow_text(row, (self.phase + i * 0.12) % 1.0, wave=True)
+                rainbow_text(row, (self.phase + i * 0.12) % 1.0, wave=wave_on)
                 for i, row in enumerate(_ASCII_POLPO)
             ]
             ascii_banner = "\n".join(ascii_rows) + "\n"
@@ -1198,10 +1228,13 @@ class TriageScreen(ModalScreen):
         ds.BUCKET_CAUTIOUS: "CAUTIOUS",
         ds.BUCKET_KEEP:     "KEEP",
     }
+    # sess.1508 round 3 a11y: glyph SHAPE-based (color-blind safe).
+    # Prima 🟢🟡🔴 = stessa forma cerchio → deutan/protan vede 3 dischi gialli
+    # indistinguibili. Ora ✓◐✕ — distinguibili anche senza colore.
     _BUCKET_EMOJI = {
-        ds.BUCKET_SAFE:     "🟢",
-        ds.BUCKET_CAUTIOUS: "🟡",
-        ds.BUCKET_KEEP:     "🔴",
+        ds.BUCKET_SAFE:     "✓",
+        ds.BUCKET_CAUTIOUS: "◐",
+        ds.BUCKET_KEEP:     "✕",
     }
 
     def compose(self) -> ComposeResult:
@@ -1230,9 +1263,9 @@ class TriageScreen(ModalScreen):
         n_keep = sum(1 for p in procs if p['bucket'] == ds.BUCKET_KEEP)
 
         self.query_one("#triage-title").update(
-            f"[bold {LIME}]🟢 SAFE ×{n_safe}[/]   "
-            f"[bold {YELLOW}]🟡 CAUTIOUS ×{n_caut}[/]   "
-            f"[bold {RED}]🔴 KEEP ×{n_keep}[/]   "
+            f"[bold {LIME}]✓ SAFE ×{n_safe}[/]   "
+            f"[bold {YELLOW}]◐ CAUTIOUS ×{n_caut}[/]   "
+            f"[bold {RED}]✕ KEEP ×{n_keep}[/]   "
             f"[{DIM}]· {len(procs)} proc Polpo[/]"
         )
         self.query_one("#triage-hint").update(
@@ -1572,6 +1605,14 @@ class M5Watcher(App):
         # Responsive layout — updated on terminal resize
         self._cols: int = 120
         self._rows: int = 40
+        # sess.1508 round 3 motion premium:
+        # - Idle freeze: quando overall<5% per N tick consecutivi, freeze
+        #   rainbow per coerenza dato↔motion (sistema calmo → app calma).
+        # - Critical flash: pressure='error' o CPU spike sostenuto → border
+        #   bottom HOT_PINK per 5s, poi revert.
+        self._idle_ticks: int = 0
+        self._critical_until: float = 0.0
+        self._critical_flash_active: bool = False
         # sess.1508 audit fix: cache last-rendered widget content per evitare
         # Static.update() inutili quando il contenuto non cambia (era il caso
         # del feed-static aggiornato ogni 2s anche con deque immutata).
@@ -1619,7 +1660,7 @@ class M5Watcher(App):
             with TabPane("📋 Logs", id="tab-logs"):
                 with ScrollableContainer(id="logs-scroll"):
                     yield Static(
-                        f"[bold #ff8a3d]📋 ACTIVITY STREAM[/]  [{DIM}]· cross-system log cascade[/]\n"
+                        f"[bold {ORANGE}]📋 ACTIVITY STREAM[/]  [{DIM}]· cross-system log cascade[/]\n"
                         f"[italic {DIM}]Every signal from every tentacolo — leads, payments, calls, voice, security.[/]",
                         id="logs-header")
                     yield DataTable(id="log-table", cursor_type="row", zebra_stripes=True)
@@ -1711,8 +1752,14 @@ class M5Watcher(App):
         top_row.styles.min_height = new_min
         top_row.styles.max_height = max(new_min + 24, 44)
         # Compact TitleBar: full=15 (ASCII banner visible), normal=8, mini=6
+        # sess.1508 round 3: env override --no-ascii / --ascii.
         title_bar = self.query_one("#title-bar", TitleBar)
-        show = self._rows >= 35 and self._cols >= 52
+        if os.environ.get("M5W_NO_ASCII") == "1":
+            show = False
+        elif os.environ.get("M5W_FORCE_ASCII") == "1":
+            show = True
+        else:
+            show = self._rows >= 35 and self._cols >= 52
         title_bar.show_ascii = show
         title_bar.styles.height = 6 if self._rows < 35 else (15 if show else 8)
         self._center_tabs()
@@ -1771,6 +1818,35 @@ class M5Watcher(App):
         lt = self.query_one("#log-table", DataTable)
         lt.add_columns("Time", " ", "Event", "Source", "Detail")
 
+    # ── Critical flash (sess.1508 round 3 motion) ────────────────────────────
+    def _trigger_critical_flash(self, reason: str = "") -> None:
+        """Border bottom HOT_PINK per 5s — l'app urla quando lo deve.
+
+        Triggerato da: pressure='error', CPU spike sostenuto.
+        Auto-revert via _refresh_fast tick.
+        """
+        if self._paused or self._critical_flash_active:
+            return
+        try:
+            tb = self.query_one("#title-bar", TitleBar)
+            tb.styles.border_bottom = ("heavy", HOT_PINK)
+            self._critical_flash_active = True
+            self._critical_until = time.time() + 5.0
+            if reason:
+                self.notify(f"⚠ CRITICAL: {reason}", severity="error", timeout=4.0)
+        except Exception:
+            pass
+
+    def _end_critical_flash(self) -> None:
+        """Revert border al colore default (TEAL o ORANGE se paused)."""
+        try:
+            tb = self.query_one("#title-bar", TitleBar)
+            target_color = ORANGE if self._paused else TEAL
+            tb.styles.border_bottom = ("heavy", target_color)
+            self._critical_flash_active = False
+        except Exception:
+            pass
+
     # ── Render cache helper (sess.1508 round 2) ──────────────────────────────
     def _update_if_changed(self, widget_id: str, content: str) -> None:
         """Static.update solo se il contenuto è diverso dal cache.
@@ -1812,8 +1888,25 @@ class M5Watcher(App):
                 self._event_feed.appendleft(
                     f"[{DIM}]{ts}[/] 🔥 [{HOT_PINK}]CPU spike[/] [{DIM}]{overall:.0f}% avg[/]"
                 )
+                self._trigger_critical_flash(reason="CPU spike sustained")
         else:
             self._cpu_spike_ticks = 0
+
+        # ── Idle freeze rainbow (sess.1508 round 3): system quiet → motion quiet.
+        # Soglia 5% per 30 tick (~60s a 2s/tick). Auto-revive su prossimo spike.
+        if overall < 5.0:
+            self._idle_ticks += 1
+        else:
+            self._idle_ticks = 0
+        try:
+            tb = self.query_one("#title-bar", TitleBar)
+            tb.idle_frozen = (self._idle_ticks >= 30)
+        except Exception:
+            pass
+
+        # ── Critical flash auto-revert (sess.1508 round 3) ────────────────────
+        if self._critical_flash_active and time.time() >= self._critical_until:
+            self._end_critical_flash()
 
         mem_now = self._mem.get('pct', 0)
         la1, _, _ = ds.load_avg()
@@ -1876,16 +1969,18 @@ class M5Watcher(App):
         ts = time.strftime("%H:%M:%S")
         new_pressure = self._mem.get('pressure', ('', 'ok'))[1]
         if self._prev_pressure and new_pressure != self._prev_pressure:
-            _pcolor  = {'ok': LIME, 'info': ELEC_BLUE, 'warning': ORANGE, 'error': HOT_PINK}
-            _pemoji  = {'ok': '🟢', 'info': '🔵', 'warning': '🟡', 'error': '🔴'}
-            _plabel  = {'ok': 'NORMAL', 'info': 'MODERATE', 'warning': 'HIGH', 'error': 'CRITICAL'}
-            c = _pcolor.get(new_pressure, DIM)
-            e = _pemoji.get(new_pressure, '⚫')
+            # sess.1508 round 3: dict pressure unificati in polpo_charts.
+            c = pc_const.PRESSURE_COLOR.get(new_pressure, DIM)
+            e = pc_const.PRESSURE_EMOJI.get(new_pressure, '⚫')
+            _label = pc_const.PRESSURE_LABEL
             self._event_feed.appendleft(
                 f"[{DIM}]{ts}[/] {e} [{c}]pressure[/] "
-                f"[{DIM}]{_plabel.get(self._prev_pressure, self._prev_pressure)}"
-                f" → {_plabel.get(new_pressure, new_pressure)}[/]"
+                f"[{DIM}]{_label.get(self._prev_pressure, self._prev_pressure)}"
+                f" → {_label.get(new_pressure, new_pressure)}[/]"
             )
+            # sess.1508 round 3 motion: pressure='error' → critical flash.
+            if new_pressure == "error":
+                self._trigger_critical_flash(reason="memory pressure CRITICAL")
         self._prev_pressure = new_pressure
 
         # ── Feed: detect swap activation / deactivation
@@ -2007,8 +2102,9 @@ class M5Watcher(App):
         pct  = bat.get('pct', 100)
         bat_emoji = '⚡' if bat.get('charging') else ('🔋' if pct > 20 else '🪫')
         prs  = self._mem.get('pressure', ('—', 'ok'))
-        pc   = {'ok': LIME, 'info': ELEC_BLUE, 'warning': ORANGE, 'error': HOT_PINK}.get(prs[1], DIM)
-        prs_emoji = {'ok': '🟢', 'info': '🔵', 'warning': '🟡', 'error': '🔴'}.get(prs[1], '⚪')
+        # sess.1508 round 3: dict pressure unificati in polpo_charts.
+        pc   = pc_const.PRESSURE_COLOR.get(prs[1], DIM)
+        prs_emoji = pc_const.PRESSURE_EMOJI.get(prs[1], '⚪')
         d, n = self._disk, self._net
         live = f'[bold {LIME}]🟢 LIVE[/]' if not self._paused else f'[bold {ORANGE}]⏸ PAUSE[/]'
 
@@ -2199,8 +2295,114 @@ class M5Watcher(App):
         self.notify(f"🕸  Filter → [{self._graph_filter}]", severity="information", timeout=1.5)
 
 
-if __name__ == "__main__":
+def _load_user_config(path: Path | None) -> dict:
+    """Load ~/.m5-watcher.toml — sess.1508 round 3 a11y/configurability fix.
+
+    Schema atteso:
+        [paths]
+        kpi  = "~/Library/.../KPI.md"
+        jarvis_dir = "~/.local/run/jarvis"
+
+        [targets]
+        mrr      = 10000
+        cash     = 10000
+        pipeline = 20000
+        cold_goal  = 30
+        cold_limit = 90
+
+        [theme]
+        high_contrast = false
+        rainbow       = true
+        ascii_banner  = "auto"   # "auto" | "off" | "on"
+
+        [refresh]
+        fast = 2.0
+        slow = 5.0
+
+    Tutte le chiavi sono opzionali; mancanze cadono su default hardcoded.
+    Non crasha se TOML manca, è invalido, o tomllib non disponibile.
+    """
+    target = path or (Path.home() / ".m5-watcher.toml")
+    if not target.exists():
+        return {}
+    try:
+        try:
+            import tomllib              # py 3.11+
+        except ImportError:
+            try:
+                import tomli as tomllib  # type: ignore
+            except ImportError:
+                return {}
+        with open(target, "rb") as f:
+            return tomllib.load(f)
+    except Exception:
+        return {}
+
+
+def _apply_user_config(cfg: dict) -> None:
+    """Applica overrides da config utente — sess.1508 round 3."""
+    if not cfg:
+        return
+    paths_cfg = cfg.get("paths", {})
+    if "kpi" in paths_cfg:
+        kpi_widget._KPI_PATH = Path(os.path.expanduser(str(paths_cfg["kpi"])))
+    if "jarvis_dir" in paths_cfg:
+        global JARVIS_DIR
+        JARVIS_DIR = Path(os.path.expanduser(str(paths_cfg["jarvis_dir"])))
+    targets = cfg.get("targets", {})
+    if "mrr" in targets:
+        kpi_widget._TARGET_MRR = float(targets["mrr"])
+    if "cash" in targets:
+        kpi_widget._TARGET_CASH = float(targets["cash"])
+    if "pipeline" in targets:
+        kpi_widget._TARGET_PIPE = float(targets["pipeline"])
+    if "cold_goal" in targets:
+        kpi_widget._COLD_GOAL = float(targets["cold_goal"])
+    if "cold_limit" in targets:
+        kpi_widget._COLD_LIMIT = float(targets["cold_limit"])
+
+
+def main() -> None:
+    """CLI entrypoint con flag a11y + configurability (sess.1508 round 3)."""
+    parser = argparse.ArgumentParser(
+        prog="m5-watcher",
+        description="🐙 M5 Max Watcher — Visual Analytics TUI for Apple Silicon.",
+    )
+    parser.add_argument("--config", type=Path, default=None,
+                        help="Path al config TOML (default: ~/.m5-watcher.toml)")
+    parser.add_argument("--no-rainbow", action="store_true",
+                        help="Disabilita animazione rainbow ASCII (utile su SSH/epilepsy).")
+    parser.add_argument("--no-ascii", action="store_true",
+                        help="Banner ASCII permanentemente nascosto (recupera 7 righe).")
+    parser.add_argument("--ascii", action="store_true",
+                        help="Forza banner ASCII anche su window piccolo.")
+    parser.add_argument("--high-contrast", action="store_true",
+                        help="Color-blind safe ramp (viridis-style) + DIM più chiaro.")
+    parser.add_argument("--debug", action="store_true",
+                        help="Verbose logging (futuro: log file).")
+    parser.add_argument("--version", action="version",
+                        version=f"m5-watcher {__version__} ({__codename__})")
+    args = parser.parse_args()
+
+    # Apply config file overrides PRIMA di costruire l'app
+    cfg = _load_user_config(args.config)
+    _apply_user_config(cfg)
+
+    # CLI flags overridano sia default che config file
+    if args.high_contrast:
+        os.environ["M5W_HIGH_CONTRAST"] = "1"
+    if args.no_rainbow:
+        os.environ["M5W_NO_RAINBOW"] = "1"
+    if args.no_ascii:
+        os.environ["M5W_NO_ASCII"] = "1"
+    if args.ascii:
+        os.environ["M5W_FORCE_ASCII"] = "1"
+
     M5Watcher().run()
+
+
+if __name__ == "__main__":
+    main()
 
 
 # ── End of file ───────────────────────────────────────────────────────────────

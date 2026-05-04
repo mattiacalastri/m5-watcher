@@ -581,6 +581,7 @@ if __name__ == "__main__":
         TestSyntax, TestDeps,
         TestUtilities, TestDataSources, TestRenderers, TestInternals,
         TestVaultParser, TestGraphWidget,
+        TestKpiWidget, TestLogFeed,        # sess.1508 round 3: erano orfani
         TestHeadlessTextual,
     ]
     for cls in groups:

@@ -2071,6 +2071,14 @@ class M5Watcher(App):
         fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent", "tab-debug"}
         hide = event.pane is not None and event.pane.id in fullscreen_tabs
         self.query_one("#top-row").display = not hide
+        # sess.1541: lazy render → la nuova tab era saltata dall'ultimo
+        # _refresh_slow. Schedula refresh immediato (non bloccante) così
+        # l'utente vede dati freschi subito invece di aspettare il prossimo
+        # tick (max 5s). Data fetch usa cache TTL upstream se disponibile.
+        try:
+            self.run_worker(self._refresh_slow(), exclusive=False, group="slow_refresh")
+        except Exception:
+            pass
         # sess.1539: TitleBar UNIFORME cross-tab — rimosso lo shrink per-tab
         # (prima collassava a 6 righe su Heatmap/Logs/Procs/Tent/Debug).
         # Sizing ora deciso solo da on_resize (cols/rows-based): l'header è
@@ -2394,47 +2402,69 @@ class M5Watcher(App):
         la1, _, _ = ds.load_avg()
         _mem_total_gb = self._mem.get('total', 0) / 1024 ** 3
         _mem_gb_str = f"{_mem_total_gb:.0f}GB" if _mem_total_gb > 0 else "—GB"
-        self._update_if_changed(
-            "mem-content",
-            f"[bold {LIME}]🧠 UNIFIED MEMORY[/]  [{DIM}]· {_mem_gb_str}[/]\n" +
-            render_mem(self._mem, self._mem_history, cpu_avg, la1),
-        )
-        await self._update_processes()
-        self._update_if_changed(
-            "graph-static",
-            graph_widget.render_graph(
-                self._graph_data,
-                filter_mode=self._graph_filter,
-                cpu_percents=self._cpu_percents,
-                cpu_history=self._cpu_history,
-                mem=self._mem,
-                mem_history=self._mem_history,
-            ),
-        )
-        self._update_if_changed("kpi-static", kpi_widget.render_kpi(self._kpi_data))
-        self._render_logs(self._log_entries)
-        self._render_sentinel(self._sentinel_data)
+
+        # sess.1541: lazy render per tab attiva — frame p95 era 531ms (vs 33ms
+        # budget) perché ogni _refresh_slow rendeva tutti i widget, anche quelli
+        # in tab non visibili. I 6 widget roadmap (cold ~310ms vector+trap) +
+        # graph_widget + sentinel domanvano il frame. Data fetch resta intero
+        # (parallelo, alimenta UNIFEED events). Solo i render sono guardati.
+        try:
+            _active_tab = self.query_one("#tab-area", TabbedContent).active
+        except Exception:
+            _active_tab = None
+        _fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent", "tab-debug"}
+        _top_row_visible = _active_tab not in _fullscreen_tabs
+
+        # mem-content vive in #top-row → render solo se top-row visibile.
+        if _top_row_visible:
+            self._update_if_changed(
+                "mem-content",
+                f"[bold {LIME}]🧠 UNIFIED MEMORY[/]  [{DIM}]· {_mem_gb_str}[/]\n" +
+                render_mem(self._mem, self._mem_history, cpu_avg, la1),
+            )
+        # proc-table (tab-procs) e tent-table (tab-tent) condividono il fetch.
+        if _active_tab in ("tab-procs", "tab-tent"):
+            await self._update_processes()
+        if _active_tab == "tab-graph":
+            self._update_if_changed(
+                "graph-static",
+                graph_widget.render_graph(
+                    self._graph_data,
+                    filter_mode=self._graph_filter,
+                    cpu_percents=self._cpu_percents,
+                    cpu_history=self._cpu_history,
+                    mem=self._mem,
+                    mem_history=self._mem_history,
+                ),
+            )
+        if _active_tab == "tab-kpi":
+            self._update_if_changed("kpi-static", kpi_widget.render_kpi(self._kpi_data))
+        if _active_tab == "tab-sent":
+            self._render_sentinel(self._sentinel_data)
 
         # sess.1534 round 4-6: roadmap-aware strip refresh (6 moduli).
         # Cold timings: vector ~240ms, trap ~310ms, others <10ms.
-        # asyncio.to_thread parallelo + return_exceptions per failure isolation.
-        roadmap_renders = await asyncio.gather(
-            asyncio.to_thread(_safe_render_polestar),
-            asyncio.to_thread(_safe_render_outstanding),
-            asyncio.to_thread(_safe_render_vectors),
-            asyncio.to_thread(_safe_render_traps),
-            asyncio.to_thread(_safe_render_filaments),
-            asyncio.to_thread(_safe_render_blocks),
-            return_exceptions=True,
-        )
-        for widget_id, result in zip(
-            ("polestar-strip", "outstanding-section", "vectors-strip",
-             "traps-banner", "filaments-section", "blocks-section"),
-            roadmap_renders,
-        ):
-            if isinstance(result, Exception):
-                continue
-            self._update_if_changed(widget_id, result or "")
+        # sess.1541: rendered SOLO quando tab-logs è attivo (cache TTL upstream
+        # tiene comunque caldi i dati per quando l'utente switcha).
+        if _active_tab == "tab-logs":
+            self._render_logs(self._log_entries)
+            roadmap_renders = await asyncio.gather(
+                asyncio.to_thread(_safe_render_polestar),
+                asyncio.to_thread(_safe_render_outstanding),
+                asyncio.to_thread(_safe_render_vectors),
+                asyncio.to_thread(_safe_render_traps),
+                asyncio.to_thread(_safe_render_filaments),
+                asyncio.to_thread(_safe_render_blocks),
+                return_exceptions=True,
+            )
+            for widget_id, result in zip(
+                ("polestar-strip", "outstanding-section", "vectors-strip",
+                 "traps-banner", "filaments-section", "blocks-section"),
+                roadmap_renders,
+            ):
+                if isinstance(result, Exception):
+                    continue
+                self._update_if_changed(widget_id, result or "")
         # sess.1508 round 4 telemetry: slow_ms + RSS poll
         self._metrics.record_slow((time.perf_counter() - _t_slow) * 1000.0)
         self._metrics.record_rss()

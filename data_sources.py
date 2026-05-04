@@ -193,8 +193,14 @@ def battery() -> dict:
 
 
 async def cpu_per_core() -> list[float]:
-    """Blocking 0.5 s sample — run in thread to avoid blocking event loop."""
-    return await asyncio.to_thread(psutil.cpu_percent, percpu=True, interval=0.5)
+    """Non-blocking sample — delta dal precedente call.
+
+    sess.1541: era `interval=0.5` (blocking) → 500ms/call → frame_p50 514ms.
+    Seed esiste già in M5Watcher.on_mount (psutil.cpu_percent percpu=True
+    interval=None), quindi il primo call utile ritorna delta accurato.
+    Cicatrice radice del CPU runaway osservato dalla TUI stessa.
+    """
+    return await asyncio.to_thread(psutil.cpu_percent, percpu=True, interval=None)
 
 
 def top_processes(n: int = 10) -> list[dict]:

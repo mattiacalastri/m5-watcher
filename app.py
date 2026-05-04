@@ -69,7 +69,7 @@ from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual import events
-from textual.widgets import DataTable, Footer, Static, TabbedContent, TabPane
+from textual.widgets import DataTable, Footer, Static, TabbedContent, TabPane, Tabs as TextualTabs
 from rich.text import Text as RichText
 
 import data_sources as ds
@@ -1308,10 +1308,10 @@ class M5Watcher(App):
         padding: 0;
     }}
     Tabs #tabs-list {{
-        min-width: auto;
+        min-width: 0;
     }}
     Tabs #tabs-list-bar {{
-        min-width: auto;
+        min-width: 0;
         align-horizontal: center;
     }}
     Tabs > #tabs-scroll {{
@@ -1576,7 +1576,33 @@ class M5Watcher(App):
         return max(20, int(self._cols * 0.45) - 12)
 
     def _center_tabs(self) -> None:
-        pass
+        """Center the tab bar by computing padding-left from terminal width and tab content width.
+
+        Textual's Tabs widget defaults to min-width: 100% on #tabs-list, which
+        forces tabs to start at the left edge. CSS workarounds (align-horizontal,
+        min-width: 0) are unreliable across Textual versions. The robust fix is
+        to apply a programmatic padding-left to the Tabs widget, recomputed on
+        every resize and on mount.
+        """
+        try:
+            tabs = self.query_one(TextualTabs)
+        except Exception:
+            return
+        tab_widgets = list(tabs.query("Tab"))
+        if not tab_widgets:
+            return
+        # Sum content widths of all tabs (label length + padding 1 3 = +6 chars per tab)
+        total_w = 0
+        for t in tab_widgets:
+            try:
+                label = t.label_text if hasattr(t, "label_text") else str(t.label)
+            except Exception:
+                label = ""
+            # +6 = padding 0 3 each side; +1 for safety/separator
+            total_w += len(label) + 7
+        avail = max(self._cols, 0)
+        pad = max(0, (avail - total_w) // 2)
+        tabs.styles.padding = (0, 0, 0, pad)
 
     def on_resize(self, event: events.Resize) -> None:
         """Capture terminal size and adapt layout + panels immediately."""

@@ -17,7 +17,7 @@ import os
 import re
 from glob import glob
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from roadmap_common import (
     RED   as COLOR_RED,
@@ -137,18 +137,30 @@ def _count_evergreen() -> int:
 
 
 def _read_mrr() -> tuple[int, int]:
-    """Ritorna (mrr_current, mrr_previous) dal frontmatter KPI.md."""
+    """Ritorna (mrr_current, mrr_previous) dal frontmatter KPI.md.
+
+    Round 9 fix (sess.1534): contract consistente — `(-1, -1)` significa
+    sempre "missing" (file mancante O field assente O parse failure).
+    Pre-fix il default `'0'` produceva (0, 0) per field assente, indistinguibile
+    da MRR=0 reale. Ora `fm.get("mrr")` senza default → `None` se assente.
+    """
     if not KPI_FILE.is_file():
         return (-1, -1)
     fm = parse_frontmatter(read_text(KPI_FILE))
 
-    def _to_int(raw: str) -> int:
+    def _to_int(raw: Optional[str]) -> int:
+        """Return -1 sentinel for missing/unparseable, int for valid."""
+        if raw is None:
+            return -1
         try:
-            return int(re.sub(r"[^\d-]", "", raw))
+            cleaned = re.sub(r"[^\d-]", "", raw)
+            if not cleaned or cleaned == "-":
+                return -1
+            return int(cleaned)
         except ValueError:
             return -1
 
-    return (_to_int(fm.get("mrr", "0")), _to_int(fm.get("mrr_previous", "0")))
+    return (_to_int(fm.get("mrr")), _to_int(fm.get("mrr_previous")))
 
 
 def _count_trinita() -> int:

@@ -581,13 +581,16 @@ class TestEdgeOutstanding(unittest.TestCase):
         self.assertEqual(_amount_to_int("€2,000"), 2000)
 
     def test_amount_to_int_with_spaces(self):
-        """€ 1.159,00 con spazi → tollerato."""
+        """€ 1.159,00 con spazi e cents → 1159 (round 9 fix).
+
+        Pre-round-9 questo input produceva 115900 (bug: separatori rimossi
+        senza distinguere migliaia da decimali). Round 9 strip trailing
+        decimals (.XX o ,XX) PRIMA di rimuovere i separatori.
+        """
         self._activate()
         from roadmap_outstanding import _amount_to_int
-        # spazi rimossi, separatori rimossi, "1.159,00" → "115900"
-        # Edge: ammontare con decimali viene "spostato" (cicatrice nota)
         result = _amount_to_int("€ 1.159,00")
-        self.assertEqual(result, 115900)  # comportamento attuale
+        self.assertEqual(result, 1159)  # round 9: cents truncated correttamente
 
     def test_amount_to_int_empty(self):
         """Stringa vuota → None."""
@@ -879,14 +882,17 @@ class TestEdgeVectors(unittest.TestCase):
         self.assertEqual(_count_cicatrici(), -1)
 
     def test_vectors_kpi_no_mrr_field(self):
-        """KPI.md senza mrr → cur=-1."""
+        """KPI.md senza mrr → cur=-1 (round 9 fix: contract consistente).
+
+        Pre-round-9 il default fm.get("mrr", "0") faceva ritornare 0
+        indistinguibile da MRR=0 reale. Round 9 fix: missing → -1 sentinel.
+        """
         _write_kpi(self.vault, "---\noutstanding: 1000\n---\n")
         _reload_roadmap_modules()
         from roadmap_vectors import _read_mrr
         cur, prev = _read_mrr()
-        # Senza mrr field: re.sub pulisce stringa "0" → 0, quindi cur=0
-        # comportamento attuale: fallback get default "0" → 0
-        self.assertEqual(cur, 0)
+        self.assertEqual(cur, -1)
+        self.assertEqual(prev, -1)
 
     def test_vectors_render_offline(self):
         """render_vectors_strip() su vault vuoto → markup balanced, no crash."""
@@ -1068,6 +1074,82 @@ class TestEdgeMarkupBalanceOffline(unittest.TestCase):
         from roadmap_traps import render_traps_banner
         out = render_traps_banner() or ""
         self._check_balance("traps", out)
+
+
+class TestRound9Patches(unittest.TestCase):
+    """3 patch financial precision sess.1534 round 9 (Plan C):
+
+    - Patch 1: parse_int_eur + _amount_to_int → drop trailing decimals
+    - Patch 2: roadmap_blocks _parse_it_date/_deadline_delta non-frozen TODAY
+    - Patch 3: roadmap_vectors _read_mrr → contract (-1,-1) consistente
+    """
+
+    def test_parse_int_eur_handles_cents(self):
+        from roadmap_common import parse_int_eur
+        cases = [
+            ("€1.159",     1159),  # senza cents
+            ("€1.159,00",  1159),  # cents 00 (cicatrice)
+            ("€1.159,50",  1159),  # cents 50 — integer truncation
+            ("€1.159,7",   1159),  # cents 7 (1 cifra)
+            ("€2,000",     2000),  # separator migliaia con virgola
+            ("€2.000,00",  2000),  # entrambi: dot migliaia + comma cents
+            ("4124",       4124),  # plain int
+            ("",           None),  # vuoto
+            ("abc",        None),  # garbage
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(parse_int_eur(raw), expected,
+                                 f"parse_int_eur({raw!r}) failed")
+
+    def test_amount_to_int_handles_cents(self):
+        for m in list(sys.modules.keys()):
+            if m.startswith("roadmap_"):
+                del sys.modules[m]
+        from roadmap_outstanding import _amount_to_int
+        # La cicatrice principale: €1.159,00 deve dare 1159 NON 115900
+        self.assertEqual(_amount_to_int("€1.159,00"), 1159)
+        self.assertEqual(_amount_to_int("€2.000,50"), 2000)
+        self.assertEqual(_amount_to_int("€1,500"), 1500)  # backward compat
+
+    def test_blocks_today_not_frozen(self):
+        """_parse_it_date accetta today esplicito → no freeze post-mezzanotte."""
+        from datetime import date
+        for m in list(sys.modules.keys()):
+            if m.startswith("roadmap_"):
+                del sys.modules[m]
+        from roadmap_blocks import _parse_it_date
+        # Same input parsed con today diverse → year inferred consistente
+        d_may = _parse_it_date("15 mag 2026", today=date(2026, 5, 4))
+        self.assertEqual(d_may, date(2026, 5, 15))
+        # Senza yr_s + today=2026-12-01 → "15 mag" futuro=2027
+        d_next = _parse_it_date("15 mag", today=date(2026, 12, 1))
+        self.assertEqual(d_next, date(2027, 5, 15))
+
+    def test_read_mrr_contract_distinguishes_missing(self):
+        """_read_mrr ritorna -1 sentinel per field missing, non 0."""
+        import tempfile
+        for m in list(sys.modules.keys()):
+            if m.startswith("roadmap_"):
+                del sys.modules[m]
+        # Crea KPI temp senza campo mrr
+        with tempfile.TemporaryDirectory() as td:
+            kpi_path = Path(td) / "KPI.md"
+            kpi_path.write_text("---\ntitle: Test\nother_field: foo\n---\n# body\n")
+            os.environ["M5_VAULT_PATH"] = td
+            try:
+                for m in list(sys.modules.keys()):
+                    if m.startswith("roadmap_"):
+                        del sys.modules[m]
+                from roadmap_vectors import _read_mrr
+                mrr, prev = _read_mrr()
+                self.assertEqual(mrr, -1, "mrr field assente → -1 sentinel")
+                self.assertEqual(prev, -1, "mrr_previous assente → -1 sentinel")
+            finally:
+                del os.environ["M5_VAULT_PATH"]
+                for m in list(sys.modules.keys()):
+                    if m.startswith("roadmap_"):
+                        del sys.modules[m]
 
 
 if __name__ == "__main__":

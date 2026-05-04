@@ -166,14 +166,23 @@ def _parse_frontmatter(text: str) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _amount_to_int(raw: str) -> Optional[int]:
-    """Converte '€2,000' / '€1.159' / '€1,155' → int.
+    """Converte '€2,000' / '€1.159' / '€1,155' / '€1.159,00' → int.
 
-    Rimuove sia ',' sia '.' (entrambi separatori migliaia per outstanding tipici
-    €100-€99.999, no decimali). Spazi e '*' tollerati.
+    Round 9 fix (sess.1534): drop trailing decimals (",XX" o ".XX") PRIMA di
+    rimuovere i separatori migliaia. Previene cicatrice "€1.159,00 → 115900"
+    quando FiscoZen emette fatture con cents.
+
+    Esempi:
+        '€2,000'     → 2000
+        '€1.159'     → 1159
+        '€1.159,00'  → 1159   (round 9 — era 115900)
+        '€1.159,50'  → 1159   (decimal dropped, integer truncation)
     """
     s = raw.strip().replace("€", "").replace(" ", "").replace("*", "")
     if not s:
         return None
+    # Strip trailing decimal block (',XX' or '.XX') BEFORE flattening separators
+    s = re.sub(r"[.,]\d{1,2}\s*$", "", s)
     s = re.sub(r"[.,]", "", s)
     try:
         return int(s)

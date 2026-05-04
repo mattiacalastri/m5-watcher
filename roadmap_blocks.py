@@ -26,7 +26,11 @@ from roadmap_common import (
     severity_color as _common_severity_color,
 )
 
-TODAY = today_date()  # ground truth, override-able via M5_TODAY_OVERRIDE
+# Round 9 (sess.1534): TODAY non più frozen all'import — TUI long-running
+# >24h vedeva D+N counter inchiodati pre-mezzanotte. Ora ogni call legge
+# today_date() fresh. Backward-compat: TODAY resta esposto per chi importa
+# il simbolo, ma punta a una property-like che ricalcola.
+TODAY = today_date()  # legacy backward-compat (può essere stale post-mezzanotte)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -62,16 +66,21 @@ def _parse_duration_days(raw: str) -> int:
 _DATE_RE = re.compile(r"(\d{1,2})\s+([A-Za-z]{3})(?:\s+(\d{4}))?")
 
 
-def _parse_it_date(text: str) -> Optional[date]:
-    """Estrae prima data italiana 'DD Mes [YYYY]' dal testo."""
+def _parse_it_date(text: str, today: Optional[date] = None) -> Optional[date]:
+    """Estrae prima data italiana 'DD Mes [YYYY]' dal testo.
+
+    Round 9: today è parametro (default = today_date() fresh) per evitare
+    freeze post-mezzanotte in TUI long-running.
+    """
+    today = today or today_date()
     for m in _DATE_RE.finditer(text):
         day_s, mon_s, yr_s = m.groups()
         mon = IT_MONTHS_SHORT.get(mon_s.lower()[:3])
         if mon is None:
             continue
         day = int(day_s)
-        year = int(yr_s) if yr_s else TODAY.year
-        if not yr_s and date(year, mon, day) < TODAY:
+        year = int(yr_s) if yr_s else today.year
+        if not yr_s and date(year, mon, day) < today:
             year += 1
         try:
             return date(year, mon, day)
@@ -82,10 +91,11 @@ def _parse_it_date(text: str) -> Optional[date]:
 
 def _deadline_delta(sblocco: str) -> Optional[str]:
     """Return 'D+N' / 'OGGI' / 'scaduto Ngg' string if a date is in sblocco."""
-    d = _parse_it_date(sblocco)
+    today = today_date()  # round 9: fresh ad ogni call (no freeze)
+    d = _parse_it_date(sblocco, today=today)
     if d is None:
         return None
-    delta = (d - TODAY).days
+    delta = (d - today).days
     if delta > 0:
         return f"D+{delta}"
     if delta == 0:

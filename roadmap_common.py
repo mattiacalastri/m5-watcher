@@ -203,16 +203,24 @@ _INT_PREFIX_RE = re.compile(r"^-?\d+")
 def parse_int_eur(raw: str | None) -> int | None:
     """Estrae primo intero da stringa, tollerante a separatori (€, ',', '.', spazi).
 
+    Round 9 (sess.1534): drop trailing decimals (",XX" o ".XX" finali) PRIMA
+    di rimuovere i separatori migliaia. Previene cicatrice "€1.159,00 → 115900".
+
     Esempi:
-        '€1,500'   → 1500
-        '€1.159'   → 1159
-        '4124'     → 4124
-        ''         → None
-        'abc'      → None
+        '€1,500'    → 1500
+        '€1.159'    → 1159
+        '€1.159,00' → 1159    (round 9 fix — era 115900)
+        '€1.159,50' → 1159    (decimal dropped, no banker round)
+        '4124'      → 4124
+        ''          → None
+        'abc'       → None
     """
     if not raw:
         return None
-    cleaned = raw.replace(",", "").replace(".", "").replace("€", "").strip()
+    cleaned = raw.strip().replace("€", "").strip()
+    # Round 9: strip trailing decimal block (',XX' o '.XX') prima dei separatori
+    cleaned = re.sub(r"[.,]\d{1,2}\s*$", "", cleaned)
+    cleaned = cleaned.replace(",", "").replace(".", "").strip()
     m = _INT_PREFIX_RE.match(cleaned)
     if not m:
         return None

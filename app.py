@@ -1306,6 +1306,13 @@ class M5Watcher(App):
         width: 100%;
         margin: 0;
         padding: 0;
+        align-horizontal: center;
+    }}
+    Tabs > #tabs-scroll {{
+        align-horizontal: center;
+    }}
+    Underline {{
+        align-horizontal: center;
     }}
     Tab {{
         color: {DIM};
@@ -1424,7 +1431,7 @@ class M5Watcher(App):
     }}
     #focus-static {{
         height: auto;
-        max-height: 18;
+        max-height: 32;
         margin-bottom: 1;
     }}
     #tent-table {{
@@ -1589,7 +1596,7 @@ class M5Watcher(App):
         self._center_tabs()
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
-        fullscreen_tabs = {"tab-graph", "tab-logs", "tab-sent"}
+        fullscreen_tabs = {"tab-graph", "tab-logs", "tab-sent", "tab-procs", "tab-tent"}
         hide = event.pane is not None and event.pane.id in fullscreen_tabs
         self.query_one("#top-row").display = not hide
 

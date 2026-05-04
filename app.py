@@ -799,6 +799,149 @@ def render_feed(feed: deque) -> str:
     return "\n".join(lines)
 
 
+def _fmt_age(sec: float | None) -> str:
+    """Compact age formatting — '<5s', '12s', '3m', '1h', '2d'."""
+    if sec is None:
+        return '—'
+    if sec < 5:
+        return '<5s'
+    if sec < 60:
+        return f"{int(sec)}s"
+    if sec < 3600:
+        return f"{int(sec / 60)}m"
+    if sec < 86400:
+        return f"{int(sec / 3600)}h"
+    return f"{int(sec / 86400)}d"
+
+
+# sess.1534 round 4: lazy import dei 5 moduli roadmap per non penalizzare
+# il startup se uno dei moduli ha errori. Cached al primo successo.
+_ROADMAP_MODULES_CACHE: dict = {}
+
+
+def _lazy_roadmap_module(name: str):
+    if name in _ROADMAP_MODULES_CACHE:
+        return _ROADMAP_MODULES_CACHE[name]
+    try:
+        mod = __import__(name)
+        _ROADMAP_MODULES_CACHE[name] = mod
+        return mod
+    except Exception:
+        _ROADMAP_MODULES_CACHE[name] = None
+        return None
+
+
+def _safe_render_polestar() -> str:
+    m = _lazy_roadmap_module("roadmap_polestar")
+    if m is None:
+        return ""
+    try:
+        return m.render_polestar_strip()
+    except Exception:
+        return ""
+
+
+def _safe_render_vectors() -> str:
+    m = _lazy_roadmap_module("roadmap_vectors")
+    if m is None:
+        return ""
+    try:
+        return m.render_vectors_strip()
+    except Exception:
+        return ""
+
+
+def _safe_render_traps() -> str:
+    m = _lazy_roadmap_module("roadmap_traps")
+    if m is None:
+        return ""
+    try:
+        return m.render_traps_banner() or ""
+    except Exception:
+        return ""
+
+
+def _safe_render_filaments() -> str:
+    m = _lazy_roadmap_module("roadmap_filaments")
+    if m is None:
+        return ""
+    try:
+        return m.render_filaments_section()
+    except Exception:
+        return ""
+
+
+def _safe_render_blocks() -> str:
+    m = _lazy_roadmap_module("roadmap_blocks")
+    if m is None:
+        return ""
+    try:
+        return m.render_blocks_section()
+    except Exception:
+        return ""
+
+
+def _render_activity_header(meta: dict) -> str:
+    """Dynamic ACTIVITY STREAM header — sess.1534.
+
+    Replaces the static "Every signal from every tentacolo" subtitle with
+    operational telemetry: sources alive, last event age, P0/P1 counts,
+    drift labels. The intent is that one glance at the box answers
+    "is my cockpit working?" without scrolling the entries.
+    """
+    total   = meta.get('sources_total', 0)
+    live    = meta.get('sources_live', 0)
+    stale   = meta.get('sources_stale', 0)
+    dead    = meta.get('sources_dead', 0)
+    p0      = meta.get('p0_count', 0)
+    p1      = meta.get('p1_count', 0)
+    age     = meta.get('last_age_sec')
+    drift   = meta.get('drift_labels', []) or []
+    entries = meta.get('total_entries', 0)
+
+    # Sources health bar — colorato in base al ratio live/total
+    if total == 0:
+        ratio_col = DIM
+    elif live / total >= 0.75:
+        ratio_col = LIME
+    elif live / total >= 0.50:
+        ratio_col = ORANGE
+    else:
+        ratio_col = RED
+    sources_str = f"[{ratio_col}]{live}/{total} live[/]"
+    if stale:
+        sources_str += f" [{ORANGE}]· {stale} stale[/]"
+    if dead:
+        sources_str += f" [{RED}]· {dead} dead[/]"
+
+    # P0/P1 indicators — silenziosi quando 0, urlanti quando attivi
+    sev_str = ''
+    if p0:
+        sev_str += f" · [bold {RED}]{p0} P0[/]"
+    if p1:
+        sev_str += f" · [bold {ORANGE}]{p1} P1[/]"
+    if not (p0 or p1):
+        sev_str = f" · [{DIM}]{entries} signals · all info[/]"
+
+    age_str = f"[{DIM}]last {_fmt_age(age)} ago[/]" if age is not None else f"[{DIM}]no events yet[/]"
+
+    # Drift labels riga 2 — solo se >=1 dead source, altrimenti italic poetic line
+    if drift:
+        drift_str = f"[{RED}]⚠ drift:[/] [{DIM}]{', '.join(drift[:5])}[/]"
+        if len(drift) > 5:
+            drift_str += f" [{DIM}]+{len(drift) - 5}[/]"
+        line2 = drift_str
+    else:
+        line2 = f"[italic {DIM}]Every signal from every tentacolo — leads, payments, calls, voice, security.[/]"
+
+    line1 = (
+        f"[bold {ORANGE}]📋 ACTIVITY STREAM[/]  "
+        f"[{DIM}]· cross-system log cascade[/]  "
+        f"[{DIM}]·[/] {sources_str} [{DIM}]·[/] {age_str}{sev_str}"
+    )
+    return f"{line1}\n{line2}"
+
+
 # ── Rainbow title (HSV flow, light pastel + wave luminosity modulation) ───────
 RAINBOW_SAT     = 0.55   # 0=grey, 1=neon. 0.55 = leggero/pastel
 RAINBOW_VAL     = 1.00   # luminosità piena di base
@@ -1558,16 +1701,28 @@ class M5Watcher(App):
     #tent-table {{
         height: auto;
     }}
+    /* sess.1525: box dedicato Debug — viola forense (DEEP_PURPL #9d4dff)
+       per coerenza con P-cluster signature (telemetria performance). */
+    #debug-scroll {{
+        background: {BG_ALT};
+        border: heavy {DEEP_PURPL};
+        padding: 1 2;
+        height: 1fr;
+    }}
     """
 
     # sess.1508 audit fix: keybinding numerici/k/f ora visibili nel Footer
     # (prima `show=False` rendeva il sistema invisibile a chi non aveva
     # memoria muscolare). Tab key labels accorciate (1-8 con label inline).
+    # sess.1525: footer raggruppato in 4 cluster con separatore │
+    # cluster control · nav tabs · actions · help → cervello legge cluster, non sequenze.
     BINDINGS = [
+        # Control cluster
         Binding("q",   "quit",           "Quit"),
         Binding("r",   "force_refresh",  "↻"),
         Binding("p",   "toggle_pause",   "⏸ Pause"),
-        Binding("1",   "show_tab_heat",  "1🌡",       show=True),
+        # Nav cluster (tabs 1-9)
+        Binding("1",   "show_tab_heat",  "│ 1🌡",      show=True),
         Binding("2",   "show_tab_stats", "2📈",       show=True),
         Binding("3",   "show_tab_procs", "3🔝",       show=True),
         Binding("4",   "show_tab_tent",  "4🐙",       show=True),
@@ -1575,12 +1730,14 @@ class M5Watcher(App):
         Binding("6",   "show_tab_kpi",   "6📊",       show=True),
         Binding("7",   "show_tab_logs",  "7📋",       show=True),
         Binding("8",   "show_tab_sent",  "8🛡",       show=True),
-        Binding("f",   "cycle_graph_filter", "Filter",  show=True),
-        Binding("c",   "triage",             "Triage",  show=True),
-        Binding("k",   "kill_tent_selected", "Kill",    show=True),
-        Binding("s",   "snapshot",           "📸 Snap", show=True),
-        Binding("d",   "show_tab_debug",     "🔬 Debug", show=True),
-        Binding("?",   "show_help",          "Help",    show=True),
+        Binding("d",   "show_tab_debug", "9🔬",       show=True),
+        # Actions cluster
+        Binding("f",   "cycle_graph_filter", "│ Filter", show=True),
+        Binding("c",   "triage",             "Triage",   show=True),
+        Binding("k",   "kill_tent_selected", "Kill",     show=True),
+        Binding("s",   "snapshot",           "📸 Snap",  show=True),
+        # Help cluster
+        Binding("?",   "show_help",          "│ Help",   show=True),
     ]
 
     def __init__(self):
@@ -1678,6 +1835,14 @@ class M5Watcher(App):
                 yield Static(f"[{DIM}]🔄 Leggendo KPI.md dal vault…[/]", id="kpi-static")
             with TabPane("📋 Logs", id="tab-logs"):
                 with ScrollableContainer(id="logs-scroll"):
+                    # sess.1534 round 4: roadmap-aware cockpit. 5 strip sopra
+                    # ACTIVITY STREAM (Polestar, Vettori, Trap, Filamenti, Blocchi).
+                    # Ognuna con refresh TTL diverso, popolata da _refresh_slow.
+                    yield Static("", id="polestar-strip",    markup=True)
+                    yield Static("", id="vectors-strip",     markup=True)
+                    yield Static("", id="traps-banner",      markup=True)
+                    yield Static("", id="filaments-section", markup=True)
+                    yield Static("", id="blocks-section",    markup=True)
                     yield Static(
                         f"[bold {ORANGE}]📋 ACTIVITY STREAM[/]  [{DIM}]· cross-system log cascade[/]\n"
                         f"[italic {DIM}]Every signal from every tentacolo — leads, payments, calls, voice, security.[/]",
@@ -1786,6 +1951,10 @@ class M5Watcher(App):
         title_bar.show_ascii = show
         title_bar.styles.height = 6 if self._rows < 35 else (15 if show else 8)
         self._center_tabs()
+        # sess.1525: layout refresh immediato per cancellare Footer/body ghost
+        # durante il delta debounce — Textual diffa solo le celle cambiate,
+        # quindi è O(viewport) e non collide col rebuild heatmap deferito.
+        self.refresh(layout=True)
         # Debounce heatmap rebuild
         if self._resize_timer is not None:
             try:
@@ -1795,7 +1964,11 @@ class M5Watcher(App):
         self._resize_timer = self.set_timer(0.15, self._on_resize_settled)
 
     def _on_resize_settled(self) -> None:
-        """Heatmap rebuild dopo che il resize si è stabilizzato (sess.1508 round 2)."""
+        """Heatmap rebuild dopo che il resize si è stabilizzato (sess.1508 round 2).
+
+        sess.1525: full layout refresh in coda — fix Footer ghost / body
+        doppio dopo split-screen o fullscreen toggle su macOS Terminal.app.
+        """
         heat_markup = render_heatmap(self._core_history, cols=self._heatmap_cols())
         self._render_cache["heat-static"] = heat_markup
         try:
@@ -1804,11 +1977,35 @@ class M5Watcher(App):
             self.query_one("#heat-static", Static).update(_heat_text)
         except Exception:
             pass
+        self.refresh(layout=True)
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent", "tab-debug"}
         hide = event.pane is not None and event.pane.id in fullscreen_tabs
         self.query_one("#top-row").display = not hide
+        # sess.1525: TitleBar adaptive per-tab — collassa a 6 righe sui tab
+        # data-dense (Heatmap/Logs/Processes/Tentacoli/Debug) per dare più
+        # respiro alle metriche; resta full sui tab strategici (KPI/Analytics/
+        # Sentinel/Graph) dove il banner POLPO è "presenza identitaria".
+        dense_tabs = {"tab-heat", "tab-logs", "tab-procs", "tab-tent", "tab-debug"}
+        is_dense = event.pane is not None and event.pane.id in dense_tabs
+        try:
+            title_bar = self.query_one("#title-bar", TitleBar)
+            if is_dense:
+                title_bar.show_ascii = False
+                title_bar.styles.height = 6
+            else:
+                # Restore: rispetta env override + criteri _rows/_cols correnti
+                if os.environ.get("M5W_NO_ASCII") == "1":
+                    show = False
+                elif os.environ.get("M5W_FORCE_ASCII") == "1":
+                    show = True
+                else:
+                    show = self._rows >= 35 and self._cols >= 52
+                title_bar.show_ascii = show
+                title_bar.styles.height = 6 if self._rows < 35 else (15 if show else 8)
+        except Exception:
+            pass
 
     async def on_mount(self) -> None:
         self._init_tables()
@@ -1836,6 +2033,21 @@ class M5Watcher(App):
         # Immediate initial load — all panels (incl. Graph + KPI) visible on startup
         await self._refresh_fast()
         await self._refresh_slow()
+        # sess.1534 round 4: pre-warm cache dei 5 moduli roadmap in background.
+        # vector + trap fanno I/O caro (~500ms) — facciamoli mentre il KPI tab
+        # è visibile, così non bloccano il primo switch a tab Logs.
+        asyncio.create_task(self._prewarm_roadmap_cache())
+
+    async def _prewarm_roadmap_cache(self) -> None:
+        """Background prewarm — riempie le cache TTL dei 5 moduli roadmap."""
+        await asyncio.gather(
+            asyncio.to_thread(_safe_render_polestar),
+            asyncio.to_thread(_safe_render_filaments),
+            asyncio.to_thread(_safe_render_blocks),
+            asyncio.to_thread(_safe_render_vectors),
+            asyncio.to_thread(_safe_render_traps),
+            return_exceptions=True,
+        )
 
     def _flush_metrics(self) -> None:
         """Append snapshot JSONL ogni 60s — sess.1508 round 4."""
@@ -2120,6 +2332,26 @@ class M5Watcher(App):
         self._update_if_changed("kpi-static", kpi_widget.render_kpi(self._kpi_data))
         self._render_logs(self._log_entries)
         self._render_sentinel(self._sentinel_data)
+
+        # sess.1534 round 4: roadmap-aware strip refresh.
+        # vector cold ~240ms / trap cold ~458ms (vault scan + subprocess).
+        # asyncio.to_thread parallelo + return_exceptions per failure isolation.
+        roadmap_renders = await asyncio.gather(
+            asyncio.to_thread(_safe_render_polestar),
+            asyncio.to_thread(_safe_render_vectors),
+            asyncio.to_thread(_safe_render_traps),
+            asyncio.to_thread(_safe_render_filaments),
+            asyncio.to_thread(_safe_render_blocks),
+            return_exceptions=True,
+        )
+        for widget_id, result in zip(
+            ("polestar-strip", "vectors-strip", "traps-banner",
+             "filaments-section", "blocks-section"),
+            roadmap_renders,
+        ):
+            if isinstance(result, Exception):
+                continue
+            self._update_if_changed(widget_id, result or "")
         # sess.1508 round 4 telemetry: slow_ms + RSS poll
         self._metrics.record_slow((time.perf_counter() - _t_slow) * 1000.0)
         self._metrics.record_rss()
@@ -2143,17 +2375,67 @@ class M5Watcher(App):
             "Session Sync": DIM,      "Vault RAG": TEAL,
             "Notes Sync": DIM,        "Outreach Err": ORANGE,
         }
-        for e in entries:
+        # sess.1534: severity badge — P0 rosso solido, P1 giallo, info dot dim
+        _SEV_BADGE = {
+            'P0':  f"[bold {RED}]●[/]",
+            'P1':  f"[bold {ORANGE}]●[/]",
+            'info': f"[{DIM}]·[/]",
+        }
+        # sess.1534 round 2: NEW = stella teal accanto al severity badge.
+        _NEW_STAR  = f"[bold {TEAL}]★[/]"
+        _NEW_EMPTY = " "
+
+        # sess.1534 round 3: priority-sticky sections.
+        # L'occhio non deve cercare il P0 nel feed cronologico — sta in cima fisso.
+        # Pattern Bloomberg/Slack: alert prima, news dopo. 3 sezioni con header
+        # divider colorato. Within-section ordering: chronological desc.
+        bucket_p0:   list = [e for e in entries if e.get('severity') == 'P0']
+        bucket_p1:   list = [e for e in entries if e.get('severity') == 'P1']
+        bucket_info: list = [e for e in entries if e.get('severity') not in ('P0', 'P1')]
+
+        def _row(e: dict):
             src_col = _SRC_COLOR.get(e['source'], DIM)
-            # NEW badge: teal dot for entries from a source active in the last 5 min
-            new_badge = f"[bold {TEAL}]●[/]" if e.get('is_new') else f"[{DIM}]·[/]"
+            sev = e.get('severity', 'info')
+            sev_badge = _SEV_BADGE.get(sev, _SEV_BADGE['info'])
+            title_col = RED if sev == 'P0' else (ORANGE if sev == 'P1' else None)
+            title_str = trunc(e['title'], 36)
+            if title_col:
+                title_str = f"[{title_col}]{title_str}[/]"
+            new_marker = _NEW_STAR if e.get('is_new') else _NEW_EMPTY
             lt.add_row(
                 f"[{DIM}]{e['ts']}[/]",
-                f"{new_badge} {e['emoji']}",
-                trunc(e['title'], 36),
+                f"{new_marker}{sev_badge} {e['emoji']}",
+                title_str,
                 f"[{src_col}]{e['source']}[/]",
                 f"[{DIM}]{trunc(e['desc'], 60)}[/]",
             )
+
+        def _section_header(label: str, count: int, color: str) -> None:
+            """Inietta una row che agisce da divider semantico."""
+            # Riga full-width: colonne svuotate tranne la 3a che porta il banner.
+            banner = f"[bold {color}]━━━ {label} ({count}) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/]"
+            lt.add_row("", "", banner, "", "")
+
+        if bucket_p0:
+            _section_header("🔴 P0 ALERT", len(bucket_p0), RED)
+            for e in bucket_p0:
+                _row(e)
+        if bucket_p1:
+            _section_header("🟡 P1 ATTENZIONE", len(bucket_p1), ORANGE)
+            for e in bucket_p1:
+                _row(e)
+        if bucket_info:
+            _section_header("📋 RECENT ACTIVITY", len(bucket_info), DIM)
+            for e in bucket_info:
+                _row(e)
+
+        # sess.1534: dynamic header — meta refresh ad ogni render
+        try:
+            meta = ds.log_feed_meta()
+        except Exception:
+            meta = None
+        if meta is not None:
+            self._update_if_changed("logs-header", _render_activity_header(meta))
 
     async def _update_processes(self) -> None:
         procs = await asyncio.to_thread(ds.top_processes, 16)

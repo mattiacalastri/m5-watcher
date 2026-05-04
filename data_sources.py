@@ -748,6 +748,288 @@ _EMPTY_SOURCES: frozenset[str] = frozenset({
     "Outreach Err", # 0B
 })
 
+# ── Severity classifier (sess.1534) ────────────────────────────────────────────
+# Ogni entry del feed riceve una severity P0|P1|info|noise.
+# P0 = revenue at risk, security incident, churn signal — sempre rosso, mai nascosto.
+# P1 = lead caldo, WAITING Mattia, follow-up dovuto — giallo, attenzione operativa.
+# info = telemetria viva ma non azionabile — neutro, scrolla via.
+# noise = errori producer, heartbeat, scan-in-corso — nascosto di default.
+_SEV_P0 = re.compile(
+    r'\b(churn|TAMPERED|lockdown|CRITICAL|FATAL|panic|crash(?:ed)?|exhaust(?:ed)?|'
+    r'kill(?:ed)?\s|breach|leak|expired|scaduto|insolvent|insolvenza|outstanding\s+\xa0?\d|'
+    r'D\+(?:[3-9]\d|\d{3,}))'  # D+30 o più = recovery operativo
+    r'|🔴|🚨|⛔|💀',
+    re.IGNORECASE,
+)
+_SEV_P1 = re.compile(
+    r'\b(nuovo\s+lead|🆕|new\s+lead|ALERT|WAITING|pending|follow[\s-]?up|'
+    r'draft\s+(?:pronto|ready)|sollecito|fattura.*scaden|payment\s+due|'
+    r'D\+(?:[7-9]|1\d|2\d))'  # D+7..D+29 = sollecito attivo
+    r'|⚠️|🟡|🔥|💰',
+    re.IGNORECASE,
+)
+_SEV_NOISE = re.compile(
+    r'(?:ASTRA_TG_BOT_TOKEN|TOKEN)\s+non\s+trovato'  # producer fault not user-actionable
+    r'|context_detector(?:\s*[:|]\s*running)?'
+    r'|n8n:\s*checking'
+    r'|GHL:\s*fetching'
+    r'|Git:\s*scanning'
+    r'|^(?:nohup|npm\s+(?:warn|error)):'
+    r'|heartbeat'
+    r'|💓\s*alive'                # daemon heartbeat — not user-actionable
+    r'|autopilot\s+(?:ON|OFF)'     # outreach daemon polling status
+    ,
+    re.IGNORECASE,
+)
+
+
+def _classify_severity(source: str, title: str, desc: str) -> str:
+    """Return P0|P1|info|noise for a feed entry. Pure-function, regex-only."""
+    blob = f'{title} {desc}'.strip()
+    # Source-level overrides — il rumore strutturale di un producer noto va a 'noise'
+    # senza dover esaminare il contenuto.
+    if source == 'Outreach Err':
+        return 'P0'  # err stream is always elevated when non-empty
+    if _SEV_NOISE.search(blob):
+        return 'noise'
+    if _SEV_P0.search(blob):
+        return 'P0'
+    if _SEV_P1.search(blob):
+        return 'P1'
+    return 'info'
+
+
+# ── Severity ranking utility ──────────────────────────────────────────────────
+_SEV_RANK = {'P0': 0, 'P1': 1, 'info': 2, 'noise': 3}
+
+
+# ── Burst collapse policy-driven (sess.1534 round 2) ──────────────────────────
+# Diversi producer scrivono N line per "evento logico". Per l'utente del cockpit
+# è una sola riga. Generalizziamo: ogni source verboso ha una BURST_POLICY che
+# definisce window + come fondere title/desc.
+#
+#   Session Sync → 12 line per run (LaunchAgent 30min)
+#   Notes Sync   → 3 line per run (Lettura/Trovate/Synced)
+#   Jarvis       → 2-3 line per keystroke (skip + Return inviato × N target)
+#   CRM Alert    → 10 line per dump giornaliero (stage breakdown tabular)
+
+
+def _picker_mrr_outstanding(burst: list[dict]) -> str:
+    """Session Sync: pesca la riga Astra Agency con MRR + Outstanding."""
+    for b in burst:
+        d = b.get('desc') or b.get('title', '')
+        if 'MRR' in d or 'Outstanding' in d:
+            return d
+    return burst[0].get('desc', '')
+
+
+def _picker_first_non_skip(burst: list[dict]) -> str:
+    """Jarvis: la prima riga che non è 'skip' è quella che porta info utili."""
+    for b in burst:
+        title = b.get('title', '').lower()
+        if not title.startswith('skip'):
+            d = b.get('desc') or b.get('title', '')
+            return d
+    return burst[0].get('desc', '')
+
+
+def _picker_notes_sync_summary(burst: list[dict]) -> str:
+    """Notes Sync: cerca la riga 'Synced N notes' (la conclusiva)."""
+    for b in burst:
+        t = b.get('title', '')
+        if 'Synced' in t or 'synced' in t:
+            return t  # 'Synced 0 notes, skipped 16 unchanged'
+    return burst[0].get('title', '')
+
+
+_CRM_TABULAR_TITLE_RE = re.compile(r'^(.+?)\s*[×x](\d+)\s*$')
+
+
+def _picker_crm_pipeline_totals(burst: list[dict]) -> str:
+    """CRM Alert: aggrega count totali da title 'Stage ×N' → riassunto."""
+    total = 0
+    demo = disco = interest = 0
+    for b in burst:
+        t = b.get('title', '')
+        m = _CRM_TABULAR_TITLE_RE.match(t)
+        if not m:
+            continue
+        stage = m.group(1).strip().lower()
+        try:
+            n = int(m.group(2))
+        except ValueError:
+            continue
+        total += n
+        if 'demo' in stage:
+            demo += n
+        elif 'disco' in stage:  # discovery / disco fissata
+            disco += n
+        elif 'interess' in stage or '🔥' in stage:
+            interest += n
+    parts = [f"{total} lead totali"]
+    if interest:
+        parts.append(f"🔥 {interest} interessati")
+    if demo:
+        parts.append(f"⚔️ {demo} demo")
+    if disco:
+        parts.append(f"🗓️ {disco} discovery")
+    return ' · '.join(parts)
+
+
+# Policy: (source_label, window_sec, title_template, desc_picker, min_count)
+# min_count = soglia minima per applicare il collapse (es. 2 = collassa solo se ≥2)
+_BURST_POLICIES: list[tuple[str, float, str, callable, int]] = [
+    ('Session Sync', 90.0, 'sync run · {n} segnali',           _picker_mrr_outstanding,    2),
+    ('Notes Sync',    30.0, 'notes sync · {n} segnali',         _picker_notes_sync_summary, 2),
+    ('Jarvis',         5.0, 'autosend · {n} keystroke',         _picker_first_non_skip,     2),
+    ('CRM Alert',     60.0, 'pipeline rollup · {n} stages',     _picker_crm_pipeline_totals,3),
+]
+
+
+def _apply_burst_policies(entries: list[dict]) -> list[dict]:
+    """Apply each burst policy in order. Entries are pre-sorted time_sort desc.
+
+    Per ogni source con policy attiva, raggruppa entries consecutive (stesso source,
+    nella finestra temporale) e le sostituisce con UNA entry consolidata.
+    """
+    policy_by_source = {p[0]: p for p in _BURST_POLICIES}
+    out: list[dict] = []
+    burst: list[dict] = []
+    burst_source: str | None = None
+
+    def _flush():
+        nonlocal burst, burst_source
+        if not burst:
+            return
+        if burst_source is None or burst_source not in policy_by_source:
+            out.extend(burst)
+            burst = []
+            burst_source = None
+            return
+        _src, _win, tmpl, picker, min_count = policy_by_source[burst_source]
+        n = len(burst)
+        if n < min_count:
+            # Sotto soglia: lascia passare le entry singole senza fondere.
+            out.extend(burst)
+        else:
+            head = dict(burst[0])  # most recent
+            head['title'] = tmpl.format(n=n)
+            try:
+                head['desc'] = picker(burst) or head.get('desc', '')
+            except Exception:
+                head['desc'] = head.get('desc', '')
+            # Eredita worst severity del burst
+            worst = min((_SEV_RANK.get(b.get('severity', 'info'), 2) for b in burst), default=2)
+            head['severity'] = next((k for k, v in _SEV_RANK.items() if v == worst), 'info')
+            out.append(head)
+        burst = []
+        burst_source = None
+
+    for e in entries:
+        src = e.get('source')
+        # Source senza policy → flush e pass-through immediato
+        if src not in policy_by_source:
+            _flush()
+            out.append(e)
+            continue
+        # Source con policy: apri o estendi il burst
+        _src, win_sec, _tmpl, _picker, _min = policy_by_source[src]
+        if not burst:
+            burst.append(e)
+            burst_source = src
+            continue
+        if burst_source == src and abs(burst[0]['time_sort'] - e['time_sort']) <= win_sec:
+            burst.append(e)
+        else:
+            _flush()
+            burst.append(e)
+            burst_source = src
+    _flush()
+    return out
+
+
+# Backward-compat alias — alcune chiamate esterne potrebbero referenziare il
+# nome originale. Lasciato come thin wrapper.
+def _collapse_session_sync_burst(entries: list[dict]) -> list[dict]:
+    return _apply_burst_policies(entries)
+
+
+# ── Drift sentinel (sess.1534) ────────────────────────────────────────────────
+# Sources con mtime > 24h sono "stale" — segnale di tentacolo morto silente.
+# Caso noto: baileys.log fermo dal 22 Apr 2026 = canale clienti WA muto.
+def source_drift_audit() -> dict:
+    """Return {label: {path, age_hours, size_b, status}} for every _LOG_SOURCES.
+
+    status ∈ {'live', 'stale', 'dead', 'missing'}
+      live    = mtime < 6h
+      stale   = 6h ≤ mtime < 24h
+      dead    = mtime ≥ 24h (drift conclamato)
+      missing = file inesistente / 0B
+    """
+    now = _time.time()
+    audit: dict[str, dict] = {}
+    for raw_path, _emoji, label in _LOG_SOURCES:
+        p = Path(raw_path).expanduser()
+        info: dict[str, object] = {'path': str(p), 'status': 'missing', 'age_hours': None, 'size_b': 0}
+        if p.exists() and p.is_file():
+            try:
+                st = p.stat()
+                age_h = (now - st.st_mtime) / 3600.0
+                info['age_hours'] = round(age_h, 1)
+                info['size_b']    = st.st_size
+                if st.st_size == 0:
+                    info['status'] = 'missing'
+                elif age_h < 6:
+                    info['status'] = 'live'
+                elif age_h < 24:
+                    info['status'] = 'stale'
+                else:
+                    info['status'] = 'dead'
+            except OSError:
+                pass
+        audit[label] = info
+    return audit
+
+
+def log_feed_meta() -> dict:
+    """Synthesize a metadata snapshot for the ACTIVITY STREAM header.
+
+    Used by app.py to render a dynamic subtitle: '14/16 sources · last 30s ago ·
+    2 P0 · 1 stale'. Purely derived from log_feed() + source_drift_audit().
+    """
+    feed = log_feed()
+    audit = source_drift_audit()
+    sources_total = len(_LOG_SOURCES)
+    sources_live  = sum(1 for v in audit.values() if v['status'] == 'live')
+    sources_stale = sum(1 for v in audit.values() if v['status'] == 'stale')
+    sources_dead  = sum(1 for v in audit.values() if v['status'] == 'dead')
+    sources_missing = sum(1 for v in audit.values() if v['status'] == 'missing')
+    p0_count = sum(1 for e in feed if e.get('severity') == 'P0')
+    p1_count = sum(1 for e in feed if e.get('severity') == 'P1')
+    last_age_sec: float | None = None
+    if feed:
+        # feed is sorted desc by time_sort — first entry is the most recent
+        try:
+            last_age_sec = max(0.0, _time.time() - float(feed[0]['time_sort']))
+        except (KeyError, TypeError, ValueError):
+            last_age_sec = None
+    # Lista nomi dead sources per tooltip / log
+    drift_labels = sorted(
+        [lbl for lbl, v in audit.items() if v['status'] == 'dead']
+    )
+    return {
+        'sources_total':   sources_total,
+        'sources_live':    sources_live,
+        'sources_stale':   sources_stale,
+        'sources_dead':    sources_dead,
+        'sources_missing': sources_missing,
+        'p0_count':        p0_count,
+        'p1_count':        p1_count,
+        'last_age_sec':    last_age_sec,
+        'drift_labels':    drift_labels,
+        'total_entries':   len(feed),
+    }
+
 
 def _tail(path: Path, n: int) -> list[str]:
     """Read last n lines without loading full file."""
@@ -861,6 +1143,7 @@ def log_feed(max_per_source: int = 25) -> list[dict]:
             # NEW badge: entry is considered "recent" if file was modified within 5 min
             # and this is one of the latest lines (first few reversed, i.e. i < 3)
             is_new = (wall_now - file_ts) < 300 and i < 3
+            severity = _classify_severity(label, title, desc)
             entries.append({
                 'ts':        ts,
                 'time_sort': sort_key,
@@ -869,6 +1152,7 @@ def log_feed(max_per_source: int = 25) -> list[dict]:
                 'title':     title,
                 'source':    label,
                 'desc':      desc,
+                'severity':  severity,
             })
 
     entries.sort(key=lambda e: e['time_sort'], reverse=True)
@@ -881,6 +1165,16 @@ def log_feed(max_per_source: int = 25) -> list[dict]:
         if key not in seen:
             seen.add(key)
             deduped.append(e)
+
+    # sess.1534 round 2: burst collapse policy-driven — 4 source verbosi
+    # (Session Sync, Notes Sync, Jarvis, CRM Alert) collassati in 1 entry/burst.
+    deduped = _apply_burst_policies(deduped)
+
+    # sess.1534: noise hidden by default — drop entries classified as 'noise'
+    # unless they're the only source still alive (defensive: never empty feed).
+    visible = [e for e in deduped if e.get('severity') != 'noise']
+    if visible:
+        deduped = visible
 
     _log_feed_cache = deduped[:150]
     _log_feed_ts = now

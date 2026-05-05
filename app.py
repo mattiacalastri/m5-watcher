@@ -1950,8 +1950,8 @@ class M5Watcher(App):
             with TabPane("🔬 Debug", id="tab-debug"):
                 with ScrollableContainer(id="debug-scroll"):
                     yield Static(
-                        f"[bold {ELEC_BLUE}]🔬 TELEMETRY SPINE[/]  [{DIM}]· claim verifiability · render counts[/]\n"
-                        f"[italic {DIM}]Where the app dissects itself — every render, every diff, every webhook fired.[/]",
+                        f"[bold {ELEC_BLUE}]🔬 TELEMETRY SPINE[/]  "
+                        f"[{DIM}]· where the app dissects itself · claim → numeri[/]",
                         id="debug-header")
                     yield Static("", id="debug-static")
         with Horizontal(id="top-row"):

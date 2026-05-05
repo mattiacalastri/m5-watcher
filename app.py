@@ -80,6 +80,7 @@ import data_sources as ds
 import vault_parser
 import graph_widget
 import kpi_widget
+import health_widget   # sess.1582: Apple Health vitals (snapshot /tmp/polpo_health_live.json)
 import polpo_charts as pc_const   # sess.1508 round 3: shared constants (PRESSURE_*, ALERT_*)
 
 # ── Telemetry spine (sess.1508 round 4) ──────────────────────────────────────
@@ -819,6 +820,44 @@ def _fmt_age(sec: float | None) -> str:
 _ROADMAP_MODULES_CACHE: dict = {}
 
 
+def _log_render_error(section: str, exc: Exception) -> None:
+    """Log render error to ~/.local/share/polpo/m5_render_errors.log + stderr.
+
+    Antifragile pattern (sess.1534 round 10): silent failures attraversano
+    3+ silenziatori. Qui catturiamo type+repr in un log persistente cosi'
+    Mattia li puo' grep dopo session-end, e il caller mostra un badge rosso
+    visibile invece di una stringa vuota.
+    """
+    try:
+        import sys
+        import traceback
+        log_dir = Path.home() / ".local/share/polpo"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "m5_render_errors.log"
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        tb = traceback.format_exception_only(type(exc), exc)[0].strip()
+        line = f"[{ts}] {section}: {tb}\n"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+        # Echo a stderr per visibilita' immediata in dev mode
+        try:
+            sys.stderr.write(f"[m5.render_error] {section}: {tb}\n")
+        except Exception:
+            pass
+    except Exception:
+        # Logging itself failed — silent fallback OK (mai bloccare il render).
+        pass
+
+
+def _render_error_badge(section: str, exc: Exception) -> str:
+    """Visible red badge per failure di una sezione cockpit.
+
+    Sostituisce la stringa vuota: il badge attraversa il rendering Rich e
+    arriva all'occhio di Mattia (UX antifragile sess.1534 round 10).
+    """
+    return f"[bold #ff3366]⚠ {section} render failed: {type(exc).__name__}[/]"
+
+
 def _lazy_roadmap_module(name: str):
     if name in _ROADMAP_MODULES_CACHE:
         return _ROADMAP_MODULES_CACHE[name]
@@ -826,7 +865,8 @@ def _lazy_roadmap_module(name: str):
         mod = __import__(name)
         _ROADMAP_MODULES_CACHE[name] = mod
         return mod
-    except Exception:
+    except Exception as e:
+        _log_render_error(f"import:{name}", e)
         _ROADMAP_MODULES_CACHE[name] = None
         return None
 
@@ -837,8 +877,9 @@ def _safe_render_polestar() -> str:
         return ""
     try:
         return m.render_polestar_strip()
-    except Exception:
-        return ""
+    except Exception as e:
+        _log_render_error("polestar", e)
+        return _render_error_badge("polestar", e)
 
 
 def _safe_render_vectors() -> str:
@@ -847,8 +888,9 @@ def _safe_render_vectors() -> str:
         return ""
     try:
         return m.render_vectors_strip()
-    except Exception:
-        return ""
+    except Exception as e:
+        _log_render_error("vectors", e)
+        return _render_error_badge("vectors", e)
 
 
 def _safe_render_traps() -> str:
@@ -857,8 +899,9 @@ def _safe_render_traps() -> str:
         return ""
     try:
         return m.render_traps_banner() or ""
-    except Exception:
-        return ""
+    except Exception as e:
+        _log_render_error("traps", e)
+        return _render_error_badge("traps", e)
 
 
 def _safe_render_filaments() -> str:
@@ -867,8 +910,9 @@ def _safe_render_filaments() -> str:
         return ""
     try:
         return m.render_filaments_section()
-    except Exception:
-        return ""
+    except Exception as e:
+        _log_render_error("filaments", e)
+        return _render_error_badge("filaments", e)
 
 
 def _safe_render_blocks() -> str:
@@ -877,8 +921,9 @@ def _safe_render_blocks() -> str:
         return ""
     try:
         return m.render_blocks_section()
-    except Exception:
-        return ""
+    except Exception as e:
+        _log_render_error("blocks", e)
+        return _render_error_badge("blocks", e)
 
 
 def _safe_render_outstanding() -> str:
@@ -888,8 +933,9 @@ def _safe_render_outstanding() -> str:
         return ""
     try:
         return m.render_outstanding_section()
-    except Exception:
-        return ""
+    except Exception as e:
+        _log_render_error("outstanding", e)
+        return _render_error_badge("outstanding", e)
 
 
 def _render_activity_header(meta: dict) -> str:
@@ -1667,11 +1713,15 @@ class M5Watcher(App):
         overflow-x: hidden;
         overflow-y: hidden;
     }}
-    #analytics-static {{
+    #analytics-scroll {{
         background: {BG_ALT};
         border: heavy {TEAL};
         padding: 1 3;
         height: 1fr;
+    }}
+    #analytics-static {{
+        background: {BG_ALT};
+        height: auto;
     }}
     #voice-static {{
         width: 1fr;
@@ -1700,12 +1750,27 @@ class M5Watcher(App):
     DataTable > .datatable--even-row {{
         background: {BG};
     }}
-    #kpi-static {{
+    #kpi-scroll {{
         background: {BG_ALT};
         border: heavy {LIME};
         border-title-color: {LIME};
         padding: 1 3;
         height: 1fr;
+    }}
+    #kpi-static {{
+        background: {BG_ALT};
+        height: auto;
+    }}
+    #health-scroll {{
+        background: {BG_ALT};
+        border: heavy {LIME};
+        border-title-color: {LIME};
+        padding: 1 3;
+        height: 1fr;
+    }}
+    #health-static {{
+        background: {BG_ALT};
+        height: auto;
     }}
     #logs-scroll {{
         background: {BG_ALT};
@@ -1791,16 +1856,17 @@ class M5Watcher(App):
         Binding("q",   "quit",           "Quit"),
         Binding("r",   "force_refresh",  "↻"),
         Binding("p",   "toggle_pause",   "⏸ Pause"),
-        # Nav cluster (tabs 1-9)
-        Binding("1",   "show_tab_heat",  "│ 1🌡",      show=True),
-        Binding("2",   "show_tab_stats", "2📈",       show=True),
-        Binding("3",   "show_tab_procs", "3🔝",       show=True),
-        Binding("4",   "show_tab_tent",  "4🐙",       show=True),
-        Binding("5",   "show_tab_graph", "5🕸",       show=True),
-        Binding("6",   "show_tab_kpi",   "6📊",       show=True),
-        Binding("7",   "show_tab_logs",  "7📋",       show=True),
-        Binding("8",   "show_tab_sent",  "8🛡",       show=True),
-        Binding("d",   "show_tab_debug", "9🔬",       show=True),
+        # Nav cluster (tabs 1-9) — sess.1558: rimosso numero da description
+        # (Textual prependeva key_display causando "1 1🌡" duplicato in footer)
+        Binding("1",   "show_tab_heat",  "│ 🌡",      show=True),
+        Binding("2",   "show_tab_stats", "📈",       show=True),
+        Binding("3",   "show_tab_procs", "🔝",       show=True),
+        Binding("4",   "show_tab_tent",  "🐙",       show=True),
+        Binding("5",   "show_tab_graph", "🕸",       show=True),
+        Binding("6",   "show_tab_kpi",   "📊",       show=True),
+        Binding("7",   "show_tab_logs",  "📋",       show=True),
+        Binding("8",   "show_tab_sent",  "🛡",       show=True),
+        Binding("d",   "show_tab_debug", "🔬",       show=True),
         # Actions cluster
         Binding("f",   "cycle_graph_filter", "│ Filter", show=True),
         Binding("c",   "triage",             "Triage",   show=True),
@@ -1831,6 +1897,7 @@ class M5Watcher(App):
         self._sess_n      = _claude_session_number()
         self._proc_counts = {'claude': 0, 'mcp': 0}
         self._kpi_data:     dict                       = {}
+        self._health_data:  dict                       = {}   # sess.1582: Apple Health snapshot
         self._focus_data:   dict                       = {}
         # Unified feed — state transition log (cross-clock: fast=CPU/voice, slow=mem/KPI)
         self._event_feed:      deque[str]              = deque(maxlen=15)
@@ -1883,11 +1950,12 @@ class M5Watcher(App):
                     yield Static(f"[{DIM}]Accumulating core samples…[/]", id="heat-static")
                     yield Static(f"[{DIM}]🔄 Loading voice…[/]", id="voice-static")
             with TabPane("📈 Analytics", id="tab-stats"):
-                yield Static(
-                    f"[bold {LIME}]📈 SYSTEM ANALYTICS[/]  [{DIM}]· CPU/RAM trend · forecasts[/]\n"
-                    f"[italic {DIM}]The shape of time — sparklines, deltas, predictions of where this system is heading.[/]",
-                    id="analytics-header")
-                yield Static(f"[{DIM}]Building statistics…[/]", id="analytics-static")
+                with ScrollableContainer(id="analytics-scroll"):
+                    yield Static(
+                        f"[bold {LIME}]📈 SYSTEM ANALYTICS[/]  [{DIM}]· CPU/RAM trend · forecasts[/]\n"
+                        f"[italic {DIM}]The shape of time — sparklines, deltas, predictions of where this system is heading.[/]",
+                        id="analytics-header")
+                    yield Static(f"[{DIM}]Building statistics…[/]", id="analytics-static")
             with TabPane("🔝 Processes", id="tab-procs"):
                 with ScrollableContainer(id="procs-box"):
                     yield Static(
@@ -1915,27 +1983,34 @@ class M5Watcher(App):
                         f"[{DIM}]🔄 Parsing vault Obsidian…[/]",
                         id="graph-static")
             with TabPane("📊 KPI", id="tab-kpi"):
-                yield Static(
-                    f"[bold {WHITE}]📊 BUSINESS KPI[/]  [{DIM}]· Astra Digital · MRR · Outstanding · Pipeline[/]\n"
-                    f"[italic {DIM}]The numbers that decide the month — every euro accounted, every lead tracked.[/]",
-                    id="kpi-header")
-                yield Static(f"[{DIM}]🔄 Leggendo KPI.md dal vault…[/]", id="kpi-static")
+                with ScrollableContainer(id="kpi-scroll"):
+                    yield Static(
+                        f"[bold {WHITE}]📊 BUSINESS KPI[/]  [{DIM}]· Astra Digital · MRR · Outstanding · Pipeline[/]\n"
+                        f"[italic {DIM}]The numbers that decide the month — every euro accounted, every lead tracked.[/]",
+                        id="kpi-header")
+                    yield Static(f"[{DIM}]🔄 Leggendo KPI.md dal vault…[/]", id="kpi-static")
+            with TabPane("🩺 Health", id="tab-health"):
+                with ScrollableContainer(id="health-scroll"):
+                    yield Static(
+                        f"[bold {LIME}]🩺 BODY VITALS[/]  [{DIM}]· Apple Health · iPhone+Watch sync[/]\n"
+                        f"[italic {DIM}]Il corpo è il primo cliente — peso, sonno, HRV, alert clinici psoriasi-aware.[/]",
+                        id="health-header")
+                    yield Static(f"[{DIM}]🔄 Leggendo /tmp/polpo_health_live.json…[/]", id="health-static")
             with TabPane("📋 Logs", id="tab-logs"):
                 with ScrollableContainer(id="logs-scroll"):
                     yield Static(
                         f"[bold {ORANGE}]📋 ACTIVITY STREAM[/]  [{DIM}]· cross-system log cascade[/]\n"
                         f"[italic {DIM}]Every signal from every tentacolo — leads, payments, calls, voice, security.[/]",
                         id="logs-header")
-                    # sess.1534 round 4-6: roadmap-aware cockpit. 6 strip sotto
-                    # l'header. Outstanding (round 6) per primo — è il battito
-                    # revenue del business e deve essere la prima cosa visibile.
+                    # sess.1586: log-table primary — Activity Stream è la natura
+                    # del tab. 6 strip roadmap come contesto sotto, non sopra.
+                    yield DataTable(id="log-table", cursor_type="row", zebra_stripes=True)
                     yield Static("", id="polestar-strip",      markup=True)
                     yield Static("", id="outstanding-section", markup=True)
                     yield Static("", id="vectors-strip",       markup=True)
                     yield Static("", id="traps-banner",        markup=True)
                     yield Static("", id="filaments-section",   markup=True)
                     yield Static("", id="blocks-section",      markup=True)
-                    yield DataTable(id="log-table", cursor_type="row", zebra_stripes=True)
             with TabPane("🛡 Sentinel", id="tab-sent"):
                 yield Static(
                     f"[bold {RED}]🛡 CYBER SENTINEL[/]  [{DIM}]· auth · canaries · alerts[/]\n"
@@ -2338,7 +2413,7 @@ class M5Watcher(App):
         _t_slow = time.perf_counter()
         (self._mem, self._bat, self._proc_counts, self._graph_data,
          self._kpi_data, self._focus_data, self._log_entries,
-         self._sentinel_data) = await asyncio.gather(
+         self._sentinel_data, self._health_data) = await asyncio.gather(
             asyncio.to_thread(ds.unified_memory),
             asyncio.to_thread(ds.battery),
             asyncio.to_thread(_count_claude_mcp),
@@ -2347,6 +2422,7 @@ class M5Watcher(App):
             asyncio.to_thread(ds.current_focus),
             asyncio.to_thread(ds.log_feed),
             asyncio.to_thread(_read_sentinel_data),
+            asyncio.to_thread(health_widget.read_health_data),
         )
         self._mem_history.append(self._mem.get('pct', 0))
 
@@ -2447,6 +2523,8 @@ class M5Watcher(App):
             )
         if _active_tab == "tab-kpi":
             self._update_if_changed("kpi-static", kpi_widget.render_kpi(self._kpi_data))
+        if _active_tab == "tab-health":
+            self._update_if_changed("health-static", health_widget.render_health(self._health_data))
         if _active_tab == "tab-sent":
             self._render_sentinel(self._sentinel_data)
 

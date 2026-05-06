@@ -29,8 +29,8 @@ def _sysctl_int(key: str, default: int) -> int:
     if not IS_MACOS:
         return default
     try:
-        return int(subprocess.check_output(['sysctl', '-n', key]).decode().strip())
-    except (subprocess.CalledProcessError, OSError, ValueError):
+        return int(subprocess.check_output(['sysctl', '-n', key], timeout=5).decode().strip())
+    except (subprocess.CalledProcessError, OSError, ValueError, subprocess.TimeoutExpired):
         return default
 
 
@@ -38,8 +38,8 @@ def _sysctl_str(key: str, default: str = '') -> str:
     if not IS_MACOS:
         return default
     try:
-        return subprocess.check_output(['sysctl', '-n', key]).decode().strip()
-    except (subprocess.CalledProcessError, OSError, ValueError):
+        return subprocess.check_output(['sysctl', '-n', key], timeout=5).decode().strip()
+    except (subprocess.CalledProcessError, OSError, ValueError, subprocess.TimeoutExpired):
         return default
 
 
@@ -103,7 +103,8 @@ def _pressure_label(free_ratio: float, swap_pct: float) -> tuple[str, str]:
 
 
 def _unified_memory_macos() -> dict:
-    out = subprocess.check_output(['vm_stat']).decode()
+    # sess.1568b code-review fix: timeout=5 — vm_stat hang freezerebbe TUI refresh loop.
+    out = subprocess.check_output(['vm_stat'], timeout=5).decode()
     pages: dict[str, int] = {}
     for line in out.splitlines():
         m = re.match(r'(.+?):\s+([\d]+)', line.strip())
@@ -162,8 +163,8 @@ def unified_memory() -> dict:
     if IS_MACOS:
         try:
             return _unified_memory_macos()
-        except (subprocess.CalledProcessError, OSError):
-            # vm_stat assente / TCC blocca subprocess → degrada a psutil.
+        except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
+            # vm_stat assente / TCC blocca subprocess / hang → degrada a psutil.
             return _unified_memory_psutil()
     return _unified_memory_psutil()
 
@@ -172,11 +173,12 @@ def battery() -> dict:
     """Stato batteria. Su non-macOS usa psutil.sensors_battery() o AC fallback."""
     if IS_MACOS:
         try:
-            out = subprocess.check_output(['pmset', '-g', 'ps']).decode()
+            # sess.1568b code-review fix: timeout=5 evita freeze su pmset hang.
+            out = subprocess.check_output(['pmset', '-g', 'ps'], timeout=5).decode()
             charging = 'AC Power' in out or 'charged' in out
             m = re.search(r'(\d+)%', out)
             return {'pct': int(m.group(1)) if m else 100, 'charging': charging}
-        except (subprocess.CalledProcessError, OSError):
+        except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
             return {'pct': 100, 'charging': True}
 
     sensors = getattr(psutil, 'sensors_battery', None)
@@ -1236,3 +1238,329 @@ def log_feed(max_per_source: int = 25) -> list[dict]:
     _log_feed_cache = deduped[:150]
     _log_feed_ts = now
     return _log_feed_cache
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Voice Agents feed — sess.1602 (Polpo Outbound Voice · Marco GEO)
+# Sorgenti:
+#   - ~/.local/share/polpo_voice_agent/calls/*.json    (1 file per call)
+#   - ~/.local/share/polpo_voice_agent/optout.jsonl    (registry permanente)
+#   - ~/.local/share/polpo_voice_agent/call_history.jsonl  (frequency cap)
+#   - ~/.config/astra/voice_agent_hybrid_policy.yaml   (caps + kill switch)
+#   - ~/.config/astra/setters.yaml ai_setter block     (agent_id + enabled)
+# ═══════════════════════════════════════════════════════════════════════════
+import json as _json
+from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+_VOICE_TELEMETRY_DIR = Path.home() / ".local" / "share" / "polpo_voice_agent"
+_VOICE_CALLS_DIR     = _VOICE_TELEMETRY_DIR / "calls"
+_VOICE_OPTOUT_FILE   = _VOICE_TELEMETRY_DIR / "optout.jsonl"
+_VOICE_HISTORY_FILE  = _VOICE_TELEMETRY_DIR / "call_history.jsonl"
+_VOICE_POLICY_FILE   = Path.home() / ".config" / "astra" / "voice_agent_hybrid_policy.yaml"
+_VOICE_SETTERS_FILE  = Path.home() / ".config" / "astra" / "setters.yaml"
+
+_VOICE_FEED_CACHE: dict = {}
+_VOICE_FEED_TS:    float = 0.0
+_VOICE_FEED_TTL:   float = 5.0   # 5s — coerente con _refresh_slow tick
+
+
+def _voice_load_yaml(path: Path) -> dict:
+    """Load YAML safely. Richiede pyyaml (in requirements.txt sess.1602).
+    Returns {} se file non esiste o yaml non installato (caller deve essere
+    defensive sui type — usare _safe_get* helpers).
+    """
+    if not path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore
+        with path.open() as f:
+            data = yaml.safe_load(f)
+            return data if isinstance(data, dict) else {}
+    except (ImportError, Exception):
+        return {}
+
+
+def _safe_dict(obj, key: str) -> dict:
+    """obj.get(key) → dict, sempre. Se manca o non è dict → {}."""
+    if not isinstance(obj, dict):
+        return {}
+    v = obj.get(key)
+    return v if isinstance(v, dict) else {}
+
+
+def _safe_list(obj, key: str) -> list:
+    """obj.get(key) → list, sempre. Se manca o non è list → []."""
+    if not isinstance(obj, dict):
+        return []
+    v = obj.get(key)
+    return v if isinstance(v, list) else []
+
+
+def _voice_mask_phone(phone: str) -> str:
+    """Maschera numero per privacy: ultimi 4 visibili. '+393331234567' → '+39 *** ***4567'."""
+    if not phone:
+        return "—"
+    digits = ''.join(c for c in phone if c.isdigit())
+    if len(digits) < 4:
+        return "+" + "*" * len(digits)
+    last4 = digits[-4:]
+    if phone.startswith('+39'):
+        return f"+39 *** *** {last4}"
+    if phone.startswith('+'):
+        prefix_end = min(3, len(phone) - 4)
+        return f"{phone[:prefix_end]} *** *** {last4}"
+    return f"*** *** {last4}"
+
+
+def _voice_parse_iso(ts_str: str) -> _dt | None:
+    """Parse ISO8601 con o senza tz; ritorna datetime aware in UTC. None se invalid."""
+    if not ts_str:
+        return None
+    try:
+        # fromisoformat 3.11+ accetta 'Z'; per compatibilità sostituiamo
+        s = ts_str.replace('Z', '+00:00')
+        d = _dt.fromisoformat(s)
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=_tz.utc)
+        return d.astimezone(_tz.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _voice_sparkline(counts: list[int]) -> str:
+    """Sparkline Unicode 8-step da serie int. Empty → bullets dim."""
+    bars = "▁▂▃▄▅▆▇█"
+    if not counts:
+        return "·" * 7
+    mn, mx = min(counts), max(counts)
+    if mn == mx:
+        # Tutti uguali: se 0 → bottom flat, altrimenti mid
+        return (bars[0] if mx == 0 else bars[3]) * len(counts)
+    return "".join(bars[int((c - mn) / (mx - mn) * 7)] for c in counts)
+
+
+def voice_agents_feed() -> dict:
+    """Aggrega telemetria voice agent per la TabPane Voice Agents (sess.1602).
+
+    Returns dict normalizzato pronto per render:
+      {
+        'enabled': bool, 'agent_id': str, 'agent_id_short': str,
+        'phone_masked': str,
+        'today_calls': int, 'cap_calls_per_day': int,
+        'budget_mtd_usd': float, 'budget_max_usd': float, 'budget_pct': float,
+        'optout_count': int,
+        'calls': [ { 'time', 'agent', 'to_masked', 'lead', 'duration_s',
+                     'status', 'outcome', 'cost_usd', 'ts_sort' }, ... ],  # latest first
+        'sparkline_7d': str,           # 7 char Unicode
+        'sparkline_counts': [int]*7,   # raw counts oldest→newest
+        'kill_switch_status': [
+            { 'reason': str, 'state': 'ok'|'warn'|'fired', 'detail': str }
+        ],
+        'errors': [str],
+      }
+    """
+    global _VOICE_FEED_CACHE, _VOICE_FEED_TS
+    now_mono = _time.monotonic()
+    if now_mono - _VOICE_FEED_TS < _VOICE_FEED_TTL and _VOICE_FEED_CACHE:
+        return _VOICE_FEED_CACHE
+
+    errors: list[str] = []
+
+    # ── 1. Setters config (ai_setter block) ───────────────────────────────────
+    setters = _voice_load_yaml(_VOICE_SETTERS_FILE)
+    ai_setter = _safe_dict(setters, 'ai_setter')
+    agent_id     = str(ai_setter.get('agent_id') or '').strip()
+    phone_id     = str(ai_setter.get('phone_number_id') or '').strip()
+    setter_enabled = bool(ai_setter.get('enabled', False))
+    enabled = setter_enabled and bool(agent_id)
+    agent_id_short = (agent_id[:8] + '…') if len(agent_id) > 9 else (agent_id or '—')
+    phone_masked   = _voice_mask_phone(phone_id) if phone_id else '—'
+
+    # ── 2. Policy YAML (caps + kill switch triggers) ──────────────────────────
+    policy = _voice_load_yaml(_VOICE_POLICY_FILE)
+    volume_cfg = _safe_dict(policy, 'volume')
+    budget_cfg = _safe_dict(policy, 'budget')
+    kill_cfg   = _safe_dict(policy, 'kill_switch')
+    cap_calls_per_day = int(volume_cfg.get('max_calls_per_day', 80) or 80)
+    budget_max_usd    = float(budget_cfg.get('max_monthly_usd', 500) or 500)
+    budget_alert_pct  = float(budget_cfg.get('alert_at_pct', 75) or 75)
+    budget_hard_pct   = float(budget_cfg.get('hard_stop_at_pct', 100) or 100)
+
+    # ── 3. Calls telemetry (1 file per call in calls/) ────────────────────────
+    calls_raw: list[dict] = []
+    if _VOICE_CALLS_DIR.exists() and _VOICE_CALLS_DIR.is_dir():
+        try:
+            for p in _VOICE_CALLS_DIR.glob('*.json'):
+                try:
+                    rec = _json.loads(p.read_text())
+                    if isinstance(rec, dict):
+                        calls_raw.append(rec)
+                except (OSError, ValueError) as e:
+                    errors.append(f"call file {p.name}: {e}")
+        except OSError as e:
+            errors.append(f"calls dir scan: {e}")
+
+    # Normalizza + sort newest-first
+    now_utc = _dt.now(_tz.utc)
+    today_utc = now_utc.date()
+    month_first_utc = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    seven_days_ago = today_utc - _td(days=6)   # 7 giorni include oggi
+
+    calls_norm: list[dict] = []
+    today_count = 0
+    budget_mtd = 0.0
+    daily_buckets: dict = {}   # date_iso → count
+
+    for rec in calls_raw:
+        ts = _voice_parse_iso(rec.get('dispatch_ts_utc') or '')
+        cost = 0.0
+        try:
+            cost = float((rec.get('cost_estimate') or {}).get('total_usd', 0) or 0)
+        except (TypeError, ValueError):
+            cost = 0.0
+
+        if ts:
+            ts_local_str = ts.astimezone().strftime('%H:%M')
+            ts_sort = ts.timestamp()
+            d = ts.date()
+            if d == today_utc:
+                today_count += 1
+            if ts >= month_first_utc:
+                budget_mtd += cost
+            if d >= seven_days_ago:
+                key = d.isoformat()
+                daily_buckets[key] = daily_buckets.get(key, 0) + 1
+        else:
+            ts_local_str = '—'
+            ts_sort = 0.0
+
+        outcome_raw = (rec.get('status') or '').strip().lower()
+        # call_successful può essere bool o stringa 'true'/'false'/'unknown'
+        cs = rec.get('call_successful')
+        if isinstance(cs, bool):
+            cs_label = 'OK' if cs else 'NO'
+        elif isinstance(cs, str) and cs.lower() in ('true', 'yes', 'success'):
+            cs_label = 'OK'
+        elif isinstance(cs, str) and cs.lower() in ('false', 'no', 'fail'):
+            cs_label = 'NO'
+        else:
+            cs_label = '?'
+
+        calls_norm.append({
+            'time':       ts_local_str,
+            'ts_sort':    ts_sort,
+            'agent':      str(rec.get('agent_id', ''))[:8] or '—',
+            'to_masked':  _voice_mask_phone(str(rec.get('to_number', '') or '')),
+            'lead':       str(rec.get('lead_name', '') or '—')[:24],
+            'duration_s': int(rec.get('duration_s', 0) or 0),
+            'status':     outcome_raw or '—',
+            'outcome':    cs_label,
+            'cost_usd':   cost,
+            'summary':    str(rec.get('summary', '') or '')[:80],
+        })
+
+    calls_norm.sort(key=lambda c: c['ts_sort'], reverse=True)
+
+    # 7-day sparkline (oldest→newest)
+    sparkline_counts = []
+    for i in range(6, -1, -1):
+        d = (today_utc - _td(days=i)).isoformat()
+        sparkline_counts.append(daily_buckets.get(d, 0))
+    sparkline_str = _voice_sparkline(sparkline_counts)
+
+    # ── 4. Opt-out registry ───────────────────────────────────────────────────
+    optout_count = 0
+    if _VOICE_OPTOUT_FILE.exists():
+        try:
+            optout_count = sum(
+                1 for line in _VOICE_OPTOUT_FILE.read_text().splitlines()
+                if line.strip()
+            )
+        except OSError as e:
+            errors.append(f"optout read: {e}")
+
+    # opt-out spike 24h (per kill switch trigger spike >10% in 24h)
+    optout_24h = 0
+    calls_24h = 0
+    if _VOICE_OPTOUT_FILE.exists():
+        try:
+            cutoff = now_utc - _td(hours=24)
+            for line in _VOICE_OPTOUT_FILE.read_text().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = _json.loads(line)
+                    ts = _voice_parse_iso(rec.get('ts', ''))
+                    if ts and ts >= cutoff:
+                        optout_24h += 1
+                except ValueError:
+                    continue
+            for c in calls_norm:
+                if c['ts_sort'] and c['ts_sort'] >= cutoff.timestamp():
+                    calls_24h += 1
+        except OSError:
+            pass
+    optout_spike_pct = (optout_24h / calls_24h * 100.0) if calls_24h else 0.0
+
+    # ── 5. Budget pct ─────────────────────────────────────────────────────────
+    budget_pct = (budget_mtd / budget_max_usd * 100.0) if budget_max_usd > 0 else 0.0
+
+    # ── 6. Kill switch status ─────────────────────────────────────────────────
+    triggers = _safe_list(kill_cfg, 'triggers')
+    kill_status: list[dict] = []
+    for trig in triggers:
+        if not isinstance(trig, dict):
+            continue
+        reason = str(trig.get('reason', '?'))
+        # Heuristics di stato basate su segnali disponibili.
+        state = 'ok'
+        detail = '—'
+        rl = reason.lower()
+        if 'garante' in rl or 'segnalazion' in rl:
+            detail = '0/3 in 7gg'
+            state = 'ok'
+        elif 'trustpilot' in rl or 'virale' in rl:
+            detail = '0 menzioni note'
+            state = 'ok'
+        elif 'opt-out' in rl or 'optout' in rl or 'opt out' in rl:
+            detail = f"{optout_24h}/{calls_24h or 0} in 24h ({optout_spike_pct:.0f}%)"
+            if optout_spike_pct >= 10.0:
+                state = 'fired'
+            elif optout_spike_pct >= 7.0:
+                state = 'warn'
+        elif 'pec' in rl or 'complaint' in rl:
+            detail = '0 PEC ricevute'
+            state = 'ok'
+        elif 'budget' in rl:
+            detail = f"${budget_mtd:.2f}/${budget_max_usd:.0f} ({budget_pct:.0f}%)"
+            if budget_pct >= budget_hard_pct:
+                state = 'fired'
+            elif budget_pct >= budget_alert_pct:
+                state = 'warn'
+        kill_status.append({'reason': reason, 'state': state, 'detail': detail})
+
+    out = {
+        'enabled':           enabled,
+        'agent_id':          agent_id,
+        'agent_id_short':    agent_id_short,
+        'phone_masked':      phone_masked,
+        'today_calls':       today_count,
+        'cap_calls_per_day': cap_calls_per_day,
+        'budget_mtd_usd':    round(budget_mtd, 2),
+        'budget_max_usd':    budget_max_usd,
+        'budget_pct':        round(budget_pct, 1),
+        'budget_alert_pct':  budget_alert_pct,
+        'budget_hard_pct':   budget_hard_pct,
+        'optout_count':      optout_count,
+        'optout_24h':        optout_24h,
+        'optout_spike_pct':  round(optout_spike_pct, 1),
+        'calls':             calls_norm[:16],
+        'sparkline_7d':      sparkline_str,
+        'sparkline_counts':  sparkline_counts,
+        'kill_switch_status': kill_status,
+        'errors':            errors,
+    }
+    _VOICE_FEED_CACHE = out
+    _VOICE_FEED_TS = now_mono
+    return out

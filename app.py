@@ -1806,9 +1806,30 @@ class M5Watcher(App):
     #kpi-header,
     #logs-header,
     #sent-header,
+    #voiceagents-header,
     #debug-header {{
         height: auto;
         padding: 0 0 1 0;
+    }}
+    /* sess.1602: Voice Agents tab — HOT_PINK frame perché è la voce di Astra. */
+    #voiceagents-scroll {{
+        background: {BG_ALT};
+        border: heavy {HOT_PINK};
+        border-title-color: {HOT_PINK};
+        padding: 1 3;
+        height: 1fr;
+    }}
+    #voiceagents-status,
+    #voiceagents-spark,
+    #voiceagents-killswitch {{
+        background: {BG_ALT};
+        height: auto;
+        padding: 0 0 1 0;
+    }}
+    #voiceagents-table {{
+        background: {BG_ALT};
+        height: auto;
+        max-height: 18;
     }}
     #log-table {{
         background: {BG_ALT};
@@ -1866,6 +1887,8 @@ class M5Watcher(App):
         Binding("6",   "show_tab_kpi",   "📊",       show=True),
         Binding("7",   "show_tab_logs",  "📋",       show=True),
         Binding("8",   "show_tab_sent",  "🛡",       show=True),
+        Binding("9",   "show_tab_voiceagents", "☎️",  show=True),
+        Binding("v",   "show_tab_voiceagents", "Voice", show=False),
         Binding("d",   "show_tab_debug", "🔬",       show=True),
         # Actions cluster
         Binding("f",   "cycle_graph_filter", "│ Filter", show=True),
@@ -1908,6 +1931,8 @@ class M5Watcher(App):
         self._prev_mrr:         float                  = 0.0
         self._prev_pipeline:    float                  = 0.0
         self._sentinel_data:    dict                   = {}
+        # sess.1602: voice agents telemetry feed cache (refresh slow tick)
+        self._voiceagents_data: dict                   = {}
         # Responsive layout — updated on terminal resize
         self._cols: int = 120
         self._rows: int = 40
@@ -2021,6 +2046,18 @@ class M5Watcher(App):
                         yield Static("", id="canary-static")
                     with ScrollableContainer(id="alerts-panel"):
                         yield Static("", id="alerts-static")
+            # sess.1602: outbound voice agent — Marco GEO live + history.
+            with TabPane("☎️ Voice Agents", id="tab-voiceagents"):
+                with ScrollableContainer(id="voiceagents-scroll"):
+                    yield Static(
+                        f"[bold {HOT_PINK}]☎️  OUTBOUND VOICE AGENTS[/]  "
+                        f"[{DIM}]· Marco GEO · live + history[/]\n"
+                        f"[italic {DIM}]Volume, budget, opt-out e kill switch — il fuoco controllato.[/]",
+                        id="voiceagents-header")
+                    yield Static("", id="voiceagents-status", markup=True)
+                    yield DataTable(id="voiceagents-table", cursor_type="row", zebra_stripes=True)
+                    yield Static("", id="voiceagents-spark", markup=True)
+                    yield Static("", id="voiceagents-killswitch", markup=True)
             # sess.1508 round 4: telemetry spine — claim verifiability live.
             with TabPane("🔬 Debug", id="tab-debug"):
                 with ScrollableContainer(id="debug-scroll"):
@@ -2236,6 +2273,9 @@ class M5Watcher(App):
         tt.add_columns(" ", "Process", "PID", "CPU %", "RAM MB", "Command", "🗑")
         lt = self.query_one("#log-table", DataTable)
         lt.add_columns("Time", " ", "Event", "Source", "Detail")
+        # sess.1602: Voice Agents call log — most recent first
+        vt = self.query_one("#voiceagents-table", DataTable)
+        vt.add_columns("TIME", "AGENT", "TO", "LEAD", "DUR", "OUTCOME", "COST")
 
     # ── Critical flash (sess.1508 round 3 motion + round 4 webhook) ──────────
     def _trigger_critical_flash(self, reason: str = "") -> None:
@@ -2314,11 +2354,17 @@ class M5Watcher(App):
         _t_start = time.perf_counter()
         self._tick += 1
 
-        self._cpu_percents, self._disk, self._net = await asyncio.gather(
+        # sess.1568b code-review fix: return_exceptions=True isola data-source failures.
+        # Senza, un singolo psutil/sysctl crash blocca tutta la TUI silenziosamente.
+        _r = await asyncio.gather(
             ds.cpu_per_core(),
             asyncio.to_thread(ds.disk_io_rate),
             asyncio.to_thread(ds.net_io_rate),
+            return_exceptions=True,
         )
+        self._cpu_percents = _r[0] if not isinstance(_r[0], BaseException) else (self._cpu_percents or [])
+        self._disk         = _r[1] if not isinstance(_r[1], BaseException) else (self._disk or {})
+        self._net          = _r[2] if not isinstance(_r[2], BaseException) else (self._net or {})
         overall = mean(self._cpu_percents) if self._cpu_percents else 0
         self._cpu_history.append(overall)
         for i, v in enumerate(self._cpu_percents):
@@ -2411,9 +2457,9 @@ class M5Watcher(App):
         if self._paused:
             return
         _t_slow = time.perf_counter()
-        (self._mem, self._bat, self._proc_counts, self._graph_data,
-         self._kpi_data, self._focus_data, self._log_entries,
-         self._sentinel_data, self._health_data) = await asyncio.gather(
+        # sess.1568b code-review fix: return_exceptions=True isola data-source failures.
+        # Battery via psutil su macOS+monitor esterno/Bluetooth fallisce noto, qui no propagation.
+        _r = await asyncio.gather(
             asyncio.to_thread(ds.unified_memory),
             asyncio.to_thread(ds.battery),
             asyncio.to_thread(_count_claude_mcp),
@@ -2423,7 +2469,21 @@ class M5Watcher(App):
             asyncio.to_thread(ds.log_feed),
             asyncio.to_thread(_read_sentinel_data),
             asyncio.to_thread(health_widget.read_health_data),
+            asyncio.to_thread(ds.voice_agents_feed),
+            return_exceptions=True,
         )
+        def _ok(idx, prev):
+            return _r[idx] if not isinstance(_r[idx], BaseException) else prev
+        self._mem             = _ok(0, self._mem or {})
+        self._bat             = _ok(1, self._bat or {})
+        self._proc_counts     = _ok(2, self._proc_counts or {'claude': 0, 'mcp': 0})
+        self._graph_data      = _ok(3, self._graph_data or {})
+        self._kpi_data        = _ok(4, self._kpi_data or {})
+        self._focus_data      = _ok(5, self._focus_data or {})
+        self._log_entries     = _ok(6, getattr(self, '_log_entries', []) or [])
+        self._sentinel_data   = _ok(7, self._sentinel_data or {})
+        self._health_data     = _ok(8, self._health_data or {})
+        self._voiceagents_data = _ok(9, getattr(self, '_voiceagents_data', {}) or {})
         self._mem_history.append(self._mem.get('pct', 0))
 
         # ── Feed: detect memory pressure transitions
@@ -2496,7 +2556,7 @@ class M5Watcher(App):
             _active_tab = self.query_one("#tab-area", TabbedContent).active
         except Exception:
             _active_tab = None
-        _fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent", "tab-debug"}
+        _fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent", "tab-debug", "tab-voiceagents"}
         _top_row_visible = _active_tab not in _fullscreen_tabs
 
         # mem-content vive in #top-row → render solo se top-row visibile.
@@ -2527,6 +2587,8 @@ class M5Watcher(App):
             self._update_if_changed("health-static", health_widget.render_health(self._health_data))
         if _active_tab == "tab-sent":
             self._render_sentinel(self._sentinel_data)
+        if _active_tab == "tab-voiceagents":
+            self._update_voice_agents_table(self._voiceagents_data)
 
         # sess.1534 round 4-6: roadmap-aware strip refresh (6 moduli).
         # Cold timings: vector ~240ms, trap ~310ms, others <10ms.
@@ -2806,6 +2868,163 @@ class M5Watcher(App):
         n_alerts = len(self._sentinel_data.get("alerts", []))
         n_canaries = len(self._sentinel_data.get("canaries", {}))
         self.notify(f"🛡  Sentinel  ·  {n_canaries} canary  ·  {n_alerts} alerts", timeout=1.5)
+
+    def action_show_tab_voiceagents(self) -> None:
+        """Tab Voice Agents — sess.1602 outbound voice (Marco GEO)."""
+        self.query_one(TabbedContent).active = "tab-voiceagents"
+        d = self._voiceagents_data or {}
+        en = "✅ ENABLED" if d.get('enabled') else "🔴 DISABLED"
+        today = d.get('today_calls', 0)
+        cap = d.get('cap_calls_per_day', 80)
+        self.notify(
+            f"☎️  Voice Agents  ·  {en}  ·  {today}/{cap} call oggi",
+            timeout=2.0,
+        )
+        # Render immediato (non aspettare il prossimo tick slow)
+        try:
+            self._update_voice_agents_table(self._voiceagents_data)
+        except Exception as e:
+            self._py_logger.exception("voice agents render fail: %s", e)
+
+    def _update_voice_agents_table(self, data: dict) -> None:
+        """Render TabPane Voice Agents — status row + table + sparkline + kill switch.
+
+        Empty state caldo, mai 'no data' freddo. Diff-cache via _update_if_changed
+        per status / spark / killswitch (Static); table re-popolata solo se
+        signature cambia (clear+add_row sono O(N) ma N<=16).
+        """
+        if not data:
+            self._update_if_changed(
+                "voiceagents-status",
+                f"[{DIM}]🔄 Caricamento telemetria voice agents…[/]",
+            )
+            return
+
+        # ── Status row ────────────────────────────────────────────────────────
+        enabled = data.get('enabled', False)
+        agent_short = data.get('agent_id_short', '—')
+        en_badge = (
+            f"[bold {LIME}]✅ ENABLED[/]" if enabled
+            else f"[bold {DIM}]🔴 DISABLED[/]"
+        )
+        today = int(data.get('today_calls', 0))
+        cap = int(data.get('cap_calls_per_day', 80))
+        cap_pct = (today / cap * 100.0) if cap > 0 else 0.0
+        cap_color = LIME if cap_pct < 50 else (ORANGE if cap_pct < 80 else HOT_PINK)
+
+        budget_mtd = float(data.get('budget_mtd_usd', 0.0))
+        budget_max = float(data.get('budget_max_usd', 500.0))
+        budget_pct = float(data.get('budget_pct', 0.0))
+        if budget_pct < 50:
+            budget_color = LIME
+        elif budget_pct < 75:
+            budget_color = YELLOW
+        else:
+            budget_color = HOT_PINK
+        # Mini gauge 10-cell: filled vs empty bar.
+        gauge_filled = max(0, min(10, int(round(budget_pct / 10.0))))
+        gauge = (
+            f"[{budget_color}]" + "█" * gauge_filled + "[/]" +
+            f"[{DIM}]" + "░" * (10 - gauge_filled) + "[/]"
+        )
+
+        optout_n = int(data.get('optout_count', 0))
+        optout_color = LIME if optout_n == 0 else (DIM if optout_n < 5 else ORANGE)
+
+        status_lines = [
+            f"[bold {WHITE}]Agent[/] {en_badge}  "
+            f"[{DIM}]· id [/][{ELEC_BLUE}]{agent_short}[/]",
+            f"[bold {WHITE}]Today[/]   "
+            f"[{cap_color}]{today:>3}[/] [{DIM}]/ {cap}[/]   "
+            f"[{DIM}]({cap_pct:.0f}% volume cap)[/]",
+            f"[bold {WHITE}]Budget[/]  "
+            f"[{budget_color}]${budget_mtd:6.2f}[/] [{DIM}]/ ${budget_max:.0f}[/]   "
+            f"{gauge}  [{budget_color}]{budget_pct:>5.1f}%[/]",
+            f"[bold {WHITE}]Opt-out[/] "
+            f"[{optout_color}]{optout_n}[/] [{DIM}]numeri permanenti[/]",
+        ]
+        status_box = "\n".join(status_lines)
+        self._update_if_changed("voiceagents-status", status_box)
+
+        # ── DataTable: live calls (max 16, newest first) ──────────────────────
+        vt = self.query_one("#voiceagents-table", DataTable)
+        calls = data.get('calls', [])
+        # Signature-based skip: ricostruisci solo se cambia.
+        sig = ";".join(
+            f"{c['ts_sort']:.0f}|{c['outcome']}|{c['duration_s']}|{c['cost_usd']:.4f}"
+            for c in calls
+        )
+        if self._render_cache.get("voiceagents-table-sig") != sig:
+            self._render_cache["voiceagents-table-sig"] = sig
+            vt.clear()
+            if not calls:
+                vt.add_row(
+                    f"[{DIM}]—[/]",
+                    f"[{DIM}]—[/]",
+                    f"[{DIM}]—[/]",
+                    f"[italic {DIM}]Nessuna call ancora — Marco è in attesa del primo dispatch[/]",
+                    f"[{DIM}]—[/]",
+                    f"[{DIM}]—[/]",
+                    f"[{DIM}]—[/]",
+                )
+            else:
+                for c in calls:
+                    dur_s = c['duration_s']
+                    dur_str = f"{dur_s//60}m{dur_s%60:02d}s" if dur_s >= 60 else f"{dur_s}s"
+                    outcome_label = c['outcome']
+                    if outcome_label == 'OK':
+                        outcome_cell = f"[bold {LIME}]●[/] [{LIME}]OK[/]"
+                    elif outcome_label == 'NO':
+                        outcome_cell = f"[bold {HOT_PINK}]●[/] [{HOT_PINK}]NO[/]"
+                    else:
+                        outcome_cell = f"[{DIM}]·  ?[/]"
+                    cost_str = f"${c['cost_usd']:.3f}" if c['cost_usd'] > 0 else f"[{DIM}]—[/]"
+                    vt.add_row(
+                        f"[{DIM}]{c['time']}[/]",
+                        f"[{ELEC_BLUE}]{c['agent']}[/]",
+                        f"[{WHITE}]{c['to_masked']}[/]",
+                        f"{c['lead']}",
+                        f"[{ELEC_BLUE}]{dur_str:>7}[/]",
+                        outcome_cell,
+                        cost_str,
+                    )
+
+        # ── Sparkline 7gg ─────────────────────────────────────────────────────
+        spark = data.get('sparkline_7d', '·' * 7)
+        spark_counts = data.get('sparkline_counts', [0] * 7)
+        total_7d = sum(spark_counts)
+        spark_line = (
+            f"[bold {ORANGE}]📈 7gg[/]  "
+            f"[{ELEC_BLUE}]{spark}[/]  "
+            f"[{DIM}]· {total_7d} call totali · max {max(spark_counts) if spark_counts else 0}/gg[/]"
+        )
+        self._update_if_changed("voiceagents-spark", spark_line)
+
+        # ── Kill switch panel ─────────────────────────────────────────────────
+        kill_status = data.get('kill_switch_status', [])
+        ks_lines = [f"[bold {RED}]🛑 KILL SWITCH STATUS[/]  [{DIM}]· trigger live monitoring[/]"]
+        if not kill_status:
+            ks_lines.append(f"[{DIM}]Nessun trigger configurato in policy.yaml[/]")
+        else:
+            for ks in kill_status:
+                state = ks.get('state', 'ok')
+                if state == 'fired':
+                    glyph = f"[bold {RED}]🔴 FIRED[/]"
+                elif state == 'warn':
+                    glyph = f"[bold {YELLOW}]🟡 WARN[/]"
+                else:
+                    glyph = f"[bold {LIME}]✅ SAFE[/]"
+                reason = ks.get('reason', '?')
+                detail = ks.get('detail', '—')
+                ks_lines.append(
+                    f"  {glyph}  [{WHITE}]{reason}[/]  [{DIM}]→ {detail}[/]"
+                )
+        # Errori (se presenti) in fondo
+        errs = data.get('errors', [])
+        if errs:
+            ks_lines.append("")
+            ks_lines.append(f"[{DIM}]· errori lettura: {len(errs)} ({errs[0][:60]})[/]")
+        self._update_if_changed("voiceagents-killswitch", "\n".join(ks_lines))
 
     def action_show_tab_debug(self) -> None:
         """Tab telemetry spine — sess.1508 round 4."""

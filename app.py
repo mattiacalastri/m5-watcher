@@ -1960,6 +1960,12 @@ class M5Watcher(App):
         self._render_cache: dict[str, str] = {}
         # Resize debounce timer (sess.1508 round 2)
         self._resize_timer = None
+        # sess.1605: trailing guard — Ghostty macos-non-native-fullscreen
+        # emette burst Resize a cadenza <150ms continua durante l'animazione,
+        # cancellando il debounce ad ogni evento → _on_resize_settled MAI
+        # chiamato → heatmap/layout congelato post-fullscreen. Timestamp del
+        # primo evento del burst forza un settle dopo MAX_RESIZE_WAIT.
+        self._resize_first_event_at: float | None = None
 
     # ── Layout ────────────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -2058,6 +2064,23 @@ class M5Watcher(App):
                     yield DataTable(id="voiceagents-table", cursor_type="row", zebra_stripes=True)
                     yield Static("", id="voiceagents-spark", markup=True)
                     yield Static("", id="voiceagents-killswitch", markup=True)
+            # sess.1605: 📡 TG Bots — Polpo Telegram Bot Watcher feed
+            #            (forge nato da Apple Note Mattia 2026-05-05 "telegram-watcher")
+            with TabPane("📡 Bots", id="tab-tgbots"):
+                with ScrollableContainer(id="tgbots-scroll"):
+                    yield Static(
+                        f"[bold {ELEC_BLUE}]📡 TG BOTS WATCHER[/]  "
+                        f"[{DIM}]· Polpo Squad notification feed · severity-aware[/]\n"
+                        f"[italic {DIM}]Ogni eco dei tentacoli passa qui prima di farsi rumore.[/]",
+                        id="tgbots-header")
+                    try:
+                        from tg_bots_widget import TgBotsWidget
+                        yield TgBotsWidget(id="tgbots-feed")
+                    except Exception as _tg_err:
+                        yield Static(
+                            f"[red]TG Bots widget non caricato: {_tg_err}[/red]\n"
+                            f"[dim]Verifica: python3 ~/projects/m5-watcher/tg_bots_widget.py[/dim]",
+                            id="tgbots-feed")
             # sess.1508 round 4: telemetry spine — claim verifiability live.
             with TabPane("🔬 Debug", id="tab-debug"):
                 with ScrollableContainer(id="debug-scroll"):
@@ -2163,20 +2186,36 @@ class M5Watcher(App):
         # durante il delta debounce — Textual diffa solo le celle cambiate,
         # quindi è O(viewport) e non collide col rebuild heatmap deferito.
         self.refresh(layout=True)
-        # Debounce heatmap rebuild
+        # Debounce heatmap rebuild + trailing guard (sess.1605)
+        # Senza guard, un burst continuo di Resize event (Ghostty
+        # fullscreen animation) cancella il timer 150ms ad ogni tick e
+        # _on_resize_settled non parte mai → freeze post-fullscreen.
+        # Guard: se sono passati >500ms dal primo evento del burst,
+        # forza il settle SUBITO ignorando il debounce.
+        MAX_RESIZE_WAIT = 0.5
+        now = time.monotonic()
+        if self._resize_first_event_at is None:
+            self._resize_first_event_at = now
         if self._resize_timer is not None:
             try:
                 self._resize_timer.stop()
             except Exception:
                 pass
-        self._resize_timer = self.set_timer(0.15, self._on_resize_settled)
+        if now - self._resize_first_event_at >= MAX_RESIZE_WAIT:
+            # Trailing guard: settle immediato, nuovo burst window.
+            self._resize_first_event_at = now
+            self._on_resize_settled()
+        else:
+            self._resize_timer = self.set_timer(0.15, self._on_resize_settled)
 
     def _on_resize_settled(self) -> None:
         """Heatmap rebuild dopo che il resize si è stabilizzato (sess.1508 round 2).
 
         sess.1525: full layout refresh in coda — fix Footer ghost / body
         doppio dopo split-screen o fullscreen toggle su macOS Terminal.app.
+        sess.1605: reset timestamp guard così il prossimo burst riparte pulito.
         """
+        self._resize_first_event_at = None
         heat_markup = render_heatmap(self._core_history, cols=self._heatmap_cols())
         self._render_cache["heat-static"] = heat_markup
         try:

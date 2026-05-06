@@ -37,3 +37,6 @@ secrets.json
 # Generated vault data — user-specific, regenerate with vault_parser.py
 semantic_areas.json
 graphify-out/
+
+# Per-file timestamped backups (sess.1602 hygiene)
+*.bak.[0-9]*

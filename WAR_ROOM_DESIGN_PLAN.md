@@ -141,4 +141,81 @@ Il rosso non è decorazione. È il suono di una sirena resa visiva.
 
 ---
 
+## 6. FEED TAB — LIVE AGGREGATOR (sess.1607 · 2026-05-07)
+
+> *"Il Feed non logga. Il Feed mostra cosa il sistema sta decidendo in questo istante."*
+
+### 6.1 Filosofia — superficie unica auto-popolante
+
+Il vecchio tab `📋 Logs` era un **text wall**: una `Static` con markup blob,
+rendering one-shot, leggibilità degradante con la verbosità. Pattern fallimentare:
+*"più dati metti, meno l'occhio trova."*
+
+Il nuovo `📋 Feed` ribalta il modello:
+- **Event stream aggregato** in alto (DataTable cronologica multi-sorgente)
+- **4 state tables strutturate** sotto, ognuna con scope semantico chiuso
+- Niente più `_safe_render_*_section` che concatenano markup → ogni superficie
+  si auto-popola via `populate_*_table(table, data)` idempotente
+
+Risultato: il cockpit non chiede più di **leggere**, chiede di **scegliere**.
+
+### 6.2 Cinque sorgenti aggregate nell'event stream
+
+| Emoji | Sorgente | Cosa porta |
+|---|---|---|
+| 🐙 | **TENTACOLI** (primario) | Status/uptime/severity_hint/last_log_line dei lobi Polpo |
+| ⚡ | **UNIFEED** | Eventi cross-pillar normalizzati (Bot/AuraHome/Astra/OS/Brand) |
+| 🔬 | **TELEMETRY** | Probe sintetici (pillar liveness, auth decay, pre_tool_check) |
+| 🛡 | **SENTINEL** | Threat events, hook violations, immune system signals |
+| 📡 | **GHL/CRM/Setter/WhatsApp/Jarvis/Voice** (preesistenti) | Eventi business già presenti, ora co-locati |
+
+L'aggregatore (`feed_aggregator.py`, 332 righe) normalizza timestamp + severity +
+sorgente in un record canonico, deduplica per `(source, key, ts_bucket)`,
+e proietta nella tabella ordinata per `severity DESC, ts DESC`.
+
+### 6.3 Quattro state tables sotto l'event stream
+
+| Table | Scope | Severity-sticky |
+|---|---|---|
+| **outstanding-table** | Cose dovute (cassa, deliverable, follow-up) | P0 stuck, P1 aging, info |
+| **traps-table** | Pattern overaction/loop/drift detected | P0 active trap, P1 watch, info |
+| **filaments-table** | Connessioni cross-cluster aperte | P0 broken, P1 weak, info |
+| **blocks-table** | Bloccanti hard (auth/dep/scope) | P0 hard block, P1 soft, info |
+
+Ogni populator helper sta in `feed_populators.py` (305 righe) e applica la regola
+**severity-sticky bucketing**: una riga P0 non scende a P1 finché la condizione
+non viene risolta a monte (no demote silenzioso = no falsa rassicurazione).
+
+### 6.4 Refresh strategy — 5s tab, 60s upstream
+
+- **Feed tab refresh**: 5s (ereditato dal vecchio Logs, validato da gaze flow)
+- **TTL upstream** sui `read_*()` roadmap_*: 60s (rate-limit naturale sui vault read)
+- **Anti-flicker**: hash diff già presente per Static, ora esteso ai 4 DataTable
+  via `_update_if_changed(table, rows_hash)` → la tabella si ridisegna **solo**
+  se il payload semantico è cambiato. Cursor position e scroll preservati.
+
+### 6.5 Pattern reusable cross-tab — populator + aggregator
+
+Questo refactor estrae **due primitive riusabili** che diventano doctrine
+per i tab futuri:
+
+1. **`populate_X_table(table, data)`** — pattern populator idempotente, severity-aware,
+   anti-flicker via hash diff. Drop-in per qualsiasi DataTable cockpit.
+2. **`aggregator(*sources) → canonical_records`** — pattern fan-in normalizzato
+   (timestamp + severity + source) con dedup. Drop-in per qualsiasi event stream.
+
+Cookie cutter per i prossimi tab refactor (Sentinel, Telemetry, Pillars):
+ogni text wall sopravvissuta è un debito di design da estinguere con la stessa coppia.
+
+### 6.6 Ground truth filosofica
+
+Il Feed non sostituisce i log. I log restano nei file. Il Feed mostra **cosa il
+sistema ha deciso che merita la tua attenzione adesso** — pre-filtrato,
+pre-bucketizzato, pre-aggregato. È la differenza tra una scrivania piena di
+fogli e una scrivania con 5 buste etichettate.
+
+> *"Un text wall mostra l'attività. Un Feed strutturato mostra l'agenda."*
+
+---
+
 *Forged sess.1594 · AI Big Data Behavioral Architect pattern · Polpo Cockpit Suite*

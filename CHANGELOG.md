@@ -5,6 +5,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 
 ---
 
+## [Unreleased] — sess.1607 · 2026-05-07 · Feed Tab refactor
+
+### Added
+- **Tab Feed** (ex Logs): 4 DataTable strutturate (outstanding/traps/filaments/blocks) + event stream aggregato.
+- `feed_populators.py` — populator helpers per le 4 DataTable, severity-sticky P0/P1/info.
+- `feed_aggregator.py` — aggregatore eventi cross-source (TENTACOLI/UNIFEED/TELEMETRY/SENTINEL).
+- `feed_tentacoli_enrich.py` — enrichment status/uptime/severity_hint/last_log_line per tentacoli.
+- `test_feed_tab.py` — N test unittest su populator + aggregator + integration.
+
+### Changed
+- Tab `tab-logs` label `📋 Logs` → `📋 Feed`. ID resta `tab-logs` per compat shortcut + fullscreen_tabs.
+- Header subtitle: "Every signal..." → "Live aggregator: tentacoli · UNIFEED · telemetry · sentinel..."
+- Banner: "📋 ACTIVITY STREAM" → "📋 AI EXECUTION FEED" (compose statico + header dinamico riga 995).
+- `_refresh_slow` update path: i 4 `_safe_render_*_section` (markup string) sostituiti da `populate_*_table` (DataTable populator). Polestar+Vectors strip restano Static markup.
+
+### Doctrine
+- Pattern 7-spade Polpo (sess.1604b) applicato: 7 agent paralleli su superfici segregate (architect/populator/aggregator/css/test/enrich/doc).
+- WAR_ROOM design preserved: AMBER `#ff8c00` header tabelle, TEAL `#00d4aa` cursor, DIM border.
+
+### Migration notes
+- I 4 `_safe_render_outstanding/_traps/_filaments/_blocks` diventano dead code → cleanup separato sess.1608+.
+- DataTable senza CSS height esplicito collassa: vedi `/tmp/feed_css_patch.md` per regole min/max-height.
+- Backup app.py: `app.py.bak.sess1607.feed_tab` (139792 bytes pre-patch).
+
+---
+
 ## [2.5.1] — 2026-05-05 · Sparkline trend in line5 + single-source API (sess.1539 round 2)
 
 **Released sess.1539 round 2** — line5 KPI passa da snapshot statico a

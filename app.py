@@ -93,6 +93,27 @@ metrics = Metrics()
 jsonl   = JsonlWriter(flush_every=1)
 logger.info("m5-watcher boot · pid=%d", os.getpid())
 
+# sess.1607: Feed Tab refactor — populator + aggregator esterni.
+# Wrapped in try/except con stub no-op fallback per evitare regressione boot
+# durante il rollout (se i moduli sister non sono presenti).
+try:
+    from feed_populators import (
+        populate_outstanding_table,
+        populate_traps_table,
+        populate_filaments_table,
+        populate_blocks_table,
+    )
+    from feed_aggregator import aggregate_feed_events
+    _FEED_MODULES_OK = True
+except Exception as _feed_imp_err:
+    _FEED_MODULES_OK = False
+    logger.warning("sess.1607 feed modules not available: %s", _feed_imp_err)
+    def populate_outstanding_table(*a, **kw): pass
+    def populate_traps_table(*a, **kw): pass
+    def populate_filaments_table(*a, **kw): pass
+    def populate_blocks_table(*a, **kw): pass
+    def aggregate_feed_events(app): return []
+
 # ── Design tokens ──────────────────────────────────────────────────────────────
 _TOKENS = json.loads((Path(__file__).parent / "polpo.tokens.json").read_text())
 P = _TOKENS["palette"]
@@ -992,7 +1013,7 @@ def _render_activity_header(meta: dict) -> str:
         line2 = f"[italic {DIM}]Every signal from every tentacolo — leads, payments, calls, voice, security.[/]"
 
     line1 = (
-        f"[bold {ORANGE}]📋 ACTIVITY STREAM[/]  "
+        f"[bold {ORANGE}]📋 AI EXECUTION FEED[/]  "  # sess.1607: rebrand da ACTIVITY STREAM
         f"[{DIM}]· cross-system log cascade[/]  "
         f"[{DIM}]·[/] {sources_str} [{DIM}]·[/] {age_str}{sev_str}"
     )
@@ -1778,6 +1799,8 @@ class M5Watcher(App):
         border-title-color: {ORANGE};
         padding: 1 3;
         height: 1fr;
+        overflow-y: auto;
+        overflow-x: hidden;
     }}
     #sentinel-row {{
         height: 1fr;
@@ -1811,6 +1834,12 @@ class M5Watcher(App):
         height: auto;
         padding: 0 0 1 0;
     }}
+    /* sess.1613: heat-header sta nudo nel TabPane (no ScrollableContainer),
+       quindi non eredita il padding 1 3 che box-a gli altri header.
+       Override allinea col testo interno di #heat-static (border 1 + pad 3 = col 4). */
+    #heat-header {{
+        padding: 0 4 1 4;
+    }}
     /* sess.1602: Voice Agents tab — HOT_PINK frame perché è la voce di Astra. */
     #voiceagents-scroll {{
         background: {BG_ALT};
@@ -1834,6 +1863,52 @@ class M5Watcher(App):
     #log-table {{
         background: {BG_ALT};
         height: 1fr;
+    }}
+    /* sess.1607 Feed Tab — 4 DataTable War Room (auto height + AMBER header) */
+    #outstanding-table,
+    #traps-table,
+    #filaments-table,
+    #blocks-table {{
+        background: {BG_ALT};
+        border: solid {DIM};
+        height: auto;
+        min-height: 4;
+        max-height: 14;
+        margin-top: 0;
+        margin-bottom: 1;
+    }}
+    #outstanding-table > .datatable--header,
+    #traps-table > .datatable--header,
+    #filaments-table > .datatable--header,
+    #blocks-table > .datatable--header {{
+        background: {BG};
+        color: {ORANGE};
+        text-style: bold;
+    }}
+    #outstanding-table > .datatable--cursor,
+    #traps-table > .datatable--cursor,
+    #filaments-table > .datatable--cursor,
+    #blocks-table > .datatable--cursor {{
+        background: {TEAL};
+        color: {BG};
+    }}
+    #outstanding-table > .datatable--even-row,
+    #traps-table > .datatable--even-row,
+    #filaments-table > .datatable--even-row,
+    #blocks-table > .datatable--even-row {{
+        background: {BG};
+    }}
+    /* sess.1607 Feed Tab — divider Static between tables */
+    #outstanding-divider,
+    #traps-divider,
+    #filaments-divider,
+    #blocks-divider {{
+        height: 1;
+        margin-top: 1;
+        margin-bottom: 0;
+        color: {ORANGE};
+        text-style: bold;
+        background: {BG_ALT};
     }}
     #procs-box {{
         background: {BG_ALT};
@@ -2027,21 +2102,25 @@ class M5Watcher(App):
                         f"[italic {DIM}]Il corpo è il primo cliente — peso, sonno, HRV, alert clinici psoriasi-aware.[/]",
                         id="health-header")
                     yield Static(f"[{DIM}]🔄 Leggendo /tmp/polpo_health_live.json…[/]", id="health-static")
-            with TabPane("📋 Logs", id="tab-logs"):
+            with TabPane("📋 Feed", id="tab-logs"):  # sess.1607: label rinominata, id resta tab-logs (compat shortcut + fullscreen_tabs)
                 with ScrollableContainer(id="logs-scroll"):
                     yield Static(
-                        f"[bold {ORANGE}]📋 ACTIVITY STREAM[/]  [{DIM}]· cross-system log cascade[/]\n"
-                        f"[italic {DIM}]Every signal from every tentacolo — leads, payments, calls, voice, security.[/]",
+                        f"[bold {ORANGE}]📋 AI EXECUTION FEED[/]  [{DIM}]· cross-system log cascade[/]\n"
+                        f"[italic {DIM}]Live aggregator: tentacoli · UNIFEED · telemetry · sentinel — intabellato, severity-aware, 5s refresh.[/]",
                         id="logs-header")
-                    # sess.1586: log-table primary — Activity Stream è la natura
-                    # del tab. 6 strip roadmap come contesto sotto, non sopra.
+                    # sess.1607: Feed Tab refactor — 4 Static blob → 4 DataTable
+                    # severity-aware. log-table resta event stream primario.
+                    yield Static("", id="polestar-strip", markup=True)
+                    yield Static("", id="vectors-strip",  markup=True)
                     yield DataTable(id="log-table", cursor_type="row", zebra_stripes=True)
-                    yield Static("", id="polestar-strip",      markup=True)
-                    yield Static("", id="outstanding-section", markup=True)
-                    yield Static("", id="vectors-strip",       markup=True)
-                    yield Static("", id="traps-banner",        markup=True)
-                    yield Static("", id="filaments-section",   markup=True)
-                    yield Static("", id="blocks-section",      markup=True)
+                    yield Static(f"[bold {ORANGE}]━━━ 💰 OUTSTANDING ━━━[/]", id="outstanding-divider", markup=True)
+                    yield DataTable(id="outstanding-table", cursor_type="row", zebra_stripes=True)
+                    yield Static(f"[bold {RED}]━━━ 🪤 TRAP ACTIVE ━━━[/]", id="traps-divider", markup=True)
+                    yield DataTable(id="traps-table", cursor_type="row", zebra_stripes=True)
+                    yield Static(f"[bold {LIME}]━━━ 🌱 FILAMENTI RADICI ━━━[/]", id="filaments-divider", markup=True)
+                    yield DataTable(id="filaments-table", cursor_type="row", zebra_stripes=True)
+                    yield Static(f"[bold {HOT_PINK}]━━━ 🚧 BLOCCHI VIVENTI ━━━[/]", id="blocks-divider", markup=True)
+                    yield DataTable(id="blocks-table", cursor_type="row", zebra_stripes=True)
             with TabPane("🛡 Sentinel", id="tab-sent"):
                 yield Static(
                     f"[bold {RED}]🛡 CYBER SENTINEL[/]  [{DIM}]· auth · canaries · alerts[/]\n"
@@ -2227,6 +2306,7 @@ class M5Watcher(App):
         self.refresh(layout=True)
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        # sess.1607: tab-logs (label "📋 Feed") — id storico mantenuto per compat shortcut + state.
         fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent", "tab-debug"}
         hide = event.pane is not None and event.pane.id in fullscreen_tabs
         self.query_one("#top-row").display = not hide
@@ -2315,6 +2395,15 @@ class M5Watcher(App):
         # sess.1602: Voice Agents call log — most recent first
         vt = self.query_one("#voiceagents-table", DataTable)
         vt.add_columns("TIME", "AGENT", "TO", "LEAD", "DUR", "OUTCOME", "COST")
+        # sess.1607: Feed Tab — 4 DataTable severity-aware (populator fill rows)
+        ot = self.query_one("#outstanding-table", DataTable)
+        ot.add_columns("Cliente", "€", "D+", "Stato", "Note")
+        rt = self.query_one("#traps-table", DataTable)
+        rt.add_columns("Trap", "Dettaglio", "Owner", "Action")
+        ft = self.query_one("#filaments-table", DataTable)
+        ft.add_columns("Filamento", "Stato", "Deadline", "Δ session")
+        bt = self.query_one("#blocks-table", DataTable)
+        bt.add_columns("Blocco", "Owner", "D+", "Severity")
 
     # ── Critical flash (sess.1508 round 3 motion + round 4 webhook) ──────────
     def _trigger_critical_flash(self, reason: str = "") -> None:
@@ -2595,6 +2684,7 @@ class M5Watcher(App):
             _active_tab = self.query_one("#tab-area", TabbedContent).active
         except Exception:
             _active_tab = None
+        # sess.1607: tab-logs (label "📋 Feed") — id storico mantenuto per compat.
         _fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent", "tab-debug", "tab-voiceagents"}
         _top_row_visible = _active_tab not in _fullscreen_tabs
 
@@ -2634,24 +2724,52 @@ class M5Watcher(App):
         # sess.1541: rendered SOLO quando tab-logs è attivo (cache TTL upstream
         # tiene comunque caldi i dati per quando l'utente switcha).
         if _active_tab == "tab-logs":
+            # sess.1607: Feed Tab refactor.
+            # 1) aggregate cross-source events (tentacoli/unifeed/telemetry/sentinel)
+            #    nel log_entries PRIMA del render (severity-aware).
+            try:
+                _new_entries = aggregate_feed_events(self) or []
+                if _new_entries:
+                    # Dedupe by (ts, source, title) per evitare doppi
+                    # quando aggregator ritorna eventi già presenti.
+                    _seen = {
+                        (e.get("ts"), e.get("source"), e.get("title"))
+                        for e in self._log_entries
+                    }
+                    for _e in _new_entries:
+                        _key = (_e.get("ts"), _e.get("source"), _e.get("title"))
+                        if _key not in _seen:
+                            self._log_entries.append(_e)
+                            _seen.add(_key)
+            except Exception as _agg_err:
+                logger.warning("feed_aggregator failed: %s", _agg_err)
             self._render_logs(self._log_entries)
-            roadmap_renders = await asyncio.gather(
+
+            # 2) polestar + vectors restano Static (banner narrativi).
+            strip_renders = await asyncio.gather(
                 asyncio.to_thread(_safe_render_polestar),
-                asyncio.to_thread(_safe_render_outstanding),
                 asyncio.to_thread(_safe_render_vectors),
-                asyncio.to_thread(_safe_render_traps),
-                asyncio.to_thread(_safe_render_filaments),
-                asyncio.to_thread(_safe_render_blocks),
                 return_exceptions=True,
             )
             for widget_id, result in zip(
-                ("polestar-strip", "outstanding-section", "vectors-strip",
-                 "traps-banner", "filaments-section", "blocks-section"),
-                roadmap_renders,
+                ("polestar-strip", "vectors-strip"),
+                strip_renders,
             ):
                 if isinstance(result, Exception):
                     continue
                 self._update_if_changed(widget_id, result or "")
+
+            # 3) populate 4 DataTable (cache TTL 60s upstream → fast path).
+            for table_id, populator in (
+                ("outstanding-table", populate_outstanding_table),
+                ("traps-table",       populate_traps_table),
+                ("filaments-table",   populate_filaments_table),
+                ("blocks-table",      populate_blocks_table),
+            ):
+                try:
+                    populator(self.query_one(f"#{table_id}", DataTable))
+                except Exception as _pop_err:
+                    logger.warning("populate %s failed: %s", table_id, _pop_err)
         # sess.1508 round 4 telemetry: slow_ms + RSS poll
         self._metrics.record_slow((time.perf_counter() - _t_slow) * 1000.0)
         self._metrics.record_rss()
@@ -2898,9 +3016,10 @@ class M5Watcher(App):
         self.notify(f"📊  KPI  ·  MRR €{int(mrr):,}".replace(',', '.'), timeout=1.5)
 
     def action_show_tab_logs(self) -> None:
+        # sess.1607: tab-logs id mantenuto per compat, label è "📋 Feed"
         self.query_one(TabbedContent).active = "tab-logs"
         lt = self.query_one("#log-table", DataTable)
-        self.notify(f"📋  Activity Stream  ·  {lt.row_count} events", timeout=1.5)
+        self.notify(f"📋  Feed  ·  {lt.row_count} events", timeout=1.5)
 
     def action_show_tab_sent(self) -> None:
         self.query_one(TabbedContent).active = "tab-sent"

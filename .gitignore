@@ -40,3 +40,7 @@ graphify-out/
 
 # Per-file timestamped backups (sess.1602 hygiene)
 *.bak.[0-9]*
+
+# Session backup files (sess.1605, sess.1607)
+*.bak.sess*
+*.bak.*.feed_tab

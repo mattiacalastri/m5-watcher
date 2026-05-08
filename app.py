@@ -1850,7 +1850,11 @@ class M5Watcher(App):
         height: 1fr;
     }}
     #voiceagents-status,
+    #voiceagents-funnel,
+    #voiceagents-intent,
+    #voiceagents-sentiment,
     #voiceagents-spark,
+    #voiceagents-spark-sent,
     #voiceagents-killswitch {{
         background: {BG_ALT};
         height: auto;
@@ -2042,6 +2046,18 @@ class M5Watcher(App):
         # chiamato → heatmap/layout congelato post-fullscreen. Timestamp del
         # primo evento del burst forza un settle dopo MAX_RESIZE_WAIT.
         self._resize_first_event_at: float | None = None
+        # sess.1700: cache layout-derived geometry per evitare ricalcolo a ogni
+        # paint. Aggiornato solo da _apply_layout(); letto da _heatmap_cols /
+        # _voice_width / _spark_width hot path widgets render.
+        self._layout_cache: dict[str, int] = {
+            "title_h":   9,
+            "top_min":   16,
+            "top_max":   40,
+            "heat_cols": 38,
+            "spark_w":   96,
+            "voice_w":   46,
+            "show_ascii": 0,  # bool 0/1 per diff fast
+        }
 
     # ── Layout ────────────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -2141,8 +2157,13 @@ class M5Watcher(App):
                         f"[italic {DIM}]Volume, budget, opt-out e kill switch — il fuoco controllato.[/]",
                         id="voiceagents-header")
                     yield Static("", id="voiceagents-status", markup=True)
+                    # sess.1683 enrich: KPI strip 3 righe (funnel + intent mix + sentiment)
+                    yield Static("", id="voiceagents-funnel", markup=True)
+                    yield Static("", id="voiceagents-intent", markup=True)
+                    yield Static("", id="voiceagents-sentiment", markup=True)
                     yield DataTable(id="voiceagents-table", cursor_type="row", zebra_stripes=True)
                     yield Static("", id="voiceagents-spark", markup=True)
+                    yield Static("", id="voiceagents-spark-sent", markup=True)
                     yield Static("", id="voiceagents-killswitch", markup=True)
             # sess.1605: 📡 TG Bots — Polpo Telegram Bot Watcher feed
             #            (forge nato da Apple Note Mattia 2026-05-05 "telegram-watcher")
@@ -2191,19 +2212,18 @@ class M5Watcher(App):
         yield Footer()
 
     # ── Responsive helpers ────────────────────────────────────────────────────
+    # sess.1700: ora leggono da _layout_cache (popolato da _apply_layout su
+    # resize). Hot path widget render → 0 aritmetica per call.
     def _heatmap_cols(self) -> int:
-        # heat-static = 1fr (50% in flex 2-figli) — sess.1508 audit fix:
-        # border=2 + padding=6 = 8 char chrome; row overhead "  P00 " (6) + "  100%" (6) = 12.
-        # Subtract 22 totali per safety contro Berkeley Mono cell-width drift su emoji.
-        return max(20, int(self._cols * 0.50) - 22)
+        return self._layout_cache.get("heat_cols", max(20, int(self._cols * 0.50) - 22))
 
     def _spark_width(self) -> int:
         """Sparkline width for analytics tab — full-width panel minus labels."""
-        return max(20, self._cols - 24)
+        return self._layout_cache.get("spark_w", max(20, self._cols - 24))
 
     def _voice_width(self) -> int:
         """Level bar width for voice panel — 1fr (50%) panel minus padding/prefix."""
-        return max(20, int(self._cols * 0.50) - 14)
+        return self._layout_cache.get("voice_w", max(20, int(self._cols * 0.50) - 14))
 
     def _center_tabs(self) -> None:
         """Center the tab bar by computing padding-left from terminal width and tab content width.
@@ -2235,43 +2255,19 @@ class M5Watcher(App):
         tabs.styles.padding = (0, 0, 0, pad)
 
     def on_resize(self, event: events.Resize) -> None:
-        """Capture terminal size and adapt layout + panels immediately.
+        """Capture terminal size and adapt layout + panels.
 
-        sess.1508 round 2: width-sensitive panels (heatmap) ridraw deferito
-        via debounce 150ms — Textual emette burst di event durante drag e il
-        rebuild sincrono creava race con _refresh_fast (entrambi su #heat-static).
-        Layout-level adjustments (height TitleBar, top-row min_height,
-        center_tabs) restano immediati perché low-cost.
+        sess.1700: window-resize coalescing.
+        - on_resize è hot path durante drag Ghostty (burst <50ms).
+        - Tutto il lavoro layout viaggia attraverso _apply_layout(coalesce=True),
+          che diffa il layout cache e applica solo i delta reali.
+        - Heatmap rebuild resta deferito via _on_resize_settled (heavy I/O).
+        - Trailing guard 500ms preservato per macos-non-native-fullscreen.
         """
         self._cols = event.size.width
         self._rows = event.size.height
-        # Shrink top-row on small terminals so tab area keeps breathing room
-        new_min = max(14, min(20, self._rows * 40 // 100))
-        top_row = self.query_one("#top-row")
-        top_row.styles.min_height = new_min
-        top_row.styles.max_height = max(new_min + 24, 44)
-        # Compact TitleBar: full=15 (ASCII banner visible), normal=8, mini=6
-        # sess.1508 round 3: env override --no-ascii / --ascii.
-        title_bar = self.query_one("#title-bar", TitleBar)
-        if os.environ.get("M5W_NO_ASCII") == "1":
-            show = False
-        elif os.environ.get("M5W_FORCE_ASCII") == "1":
-            show = True
-        else:
-            show = self._rows >= 35 and self._cols >= 52
-        title_bar.show_ascii = show
-        title_bar.styles.height = 7 if self._rows < 35 else (16 if show else 9)
-        self._center_tabs()
-        # sess.1525: layout refresh immediato per cancellare Footer/body ghost
-        # durante il delta debounce — Textual diffa solo le celle cambiate,
-        # quindi è O(viewport) e non collide col rebuild heatmap deferito.
-        self.refresh(layout=True)
-        # Debounce heatmap rebuild + trailing guard (sess.1605)
-        # Senza guard, un burst continuo di Resize event (Ghostty
-        # fullscreen animation) cancella il timer 150ms ad ogni tick e
-        # _on_resize_settled non parte mai → freeze post-fullscreen.
-        # Guard: se sono passati >500ms dal primo evento del burst,
-        # forza il settle SUBITO ignorando il debounce.
+        self._apply_layout(coalesce=True)
+        # Trailing guard (sess.1605) — non rimosso, garantisce settle post-burst.
         MAX_RESIZE_WAIT = 0.5
         now = time.monotonic()
         if self._resize_first_event_at is None:
@@ -2282,11 +2278,96 @@ class M5Watcher(App):
             except Exception:
                 pass
         if now - self._resize_first_event_at >= MAX_RESIZE_WAIT:
-            # Trailing guard: settle immediato, nuovo burst window.
             self._resize_first_event_at = now
             self._on_resize_settled()
         else:
-            self._resize_timer = self.set_timer(0.15, self._on_resize_settled)
+            # sess.1700: 80ms (era 150ms) — Textual diffing è O(viewport),
+            # accelerare l'eco visivo durante drag senza saturare il rebuild
+            # heatmap che è l'unico costo reale.
+            self._resize_timer = self.set_timer(0.08, self._on_resize_settled)
+
+    # ── Single-source layout applier (sess.1700) ──────────────────────────────
+    def _apply_layout(self, *, coalesce: bool = False) -> None:
+        """Compute geometry from (cols, rows) and apply only deltas to widgets.
+
+        Centralizza i calcoli che prima vivevano in on_resize +
+        on_tabbed_content_tab_activated (doppio path → doppio repaint durante
+        drag che attraversa una nuova tab). Cache `_layout_cache` evita
+        styles.write su valori invariati — è la parte che ammazza il glitch.
+
+        Gradient continuo TitleBar (sess.1700):
+        - Sotto 35 righe: 7 (compact, no ASCII).
+        - Tra 35 e 50: 9 → 12 lerp lineare.
+        - Da 50 in su con ASCII visibile: 16 fisso (banner pieno).
+        - Da 50 in su senza ASCII (cols<52 o env override): 9.
+        Niente più salto discreto 9→16 alla soglia 35 righe.
+        """
+        cols, rows = self._cols, self._rows
+        cache = self._layout_cache
+
+        # ASCII banner decision — env override prioritario.
+        if os.environ.get("M5W_NO_ASCII") == "1":
+            show = False
+        elif os.environ.get("M5W_FORCE_ASCII") == "1":
+            show = True
+        else:
+            show = rows >= 35 and cols >= 52
+        show_int = 1 if show else 0
+
+        # TitleBar height — gradient continuo.
+        if rows < 35:
+            title_h = 7
+        elif show:
+            # 35→50 rows mappato su 12→16 linearmente, oltre 50 = 16.
+            t = max(0.0, min(1.0, (rows - 35) / 15.0))
+            title_h = int(round(12 + (16 - 12) * t))
+        else:
+            title_h = 9
+
+        # top-row clamp scalato su altezza viewport (era hardcoded 14/20).
+        top_min = max(14, min(22, rows * 40 // 100))
+        top_max = max(top_min + 24, 44)
+
+        # Width-derived geometries (cache hot path widgets).
+        heat_cols = max(20, int(cols * 0.50) - 22)
+        spark_w = max(20, cols - 24)
+        voice_w = max(20, int(cols * 0.50) - 14)
+
+        new_geom = {
+            "title_h":   title_h,
+            "top_min":   top_min,
+            "top_max":   top_max,
+            "heat_cols": heat_cols,
+            "spark_w":   spark_w,
+            "voice_w":   voice_w,
+            "show_ascii": show_int,
+        }
+
+        # Diff-apply: niente styles.write se invariato (Textual marca dirty
+        # anche su set identico → schedula repaint extra durante drag burst).
+        try:
+            title_bar = self.query_one("#title-bar", TitleBar)
+            if cache["show_ascii"] != show_int:
+                title_bar.show_ascii = show
+            if cache["title_h"] != title_h:
+                title_bar.styles.height = title_h
+        except Exception:
+            pass
+        try:
+            top_row = self.query_one("#top-row")
+            if cache["top_min"] != top_min:
+                top_row.styles.min_height = top_min
+            if cache["top_max"] != top_max:
+                top_row.styles.max_height = top_max
+        except Exception:
+            pass
+
+        self._layout_cache = new_geom
+        self._center_tabs()
+        # sess.1525: layout refresh immediato per cancellare Footer/body ghost.
+        # sess.1700: skip se nessun delta reale (resize che non cambia tier).
+        if not coalesce or new_geom != cache:
+            self.refresh(layout=True)
 
     def _on_resize_settled(self) -> None:
         """Heatmap rebuild dopo che il resize si è stabilizzato (sess.1508 round 2).
@@ -2323,21 +2404,25 @@ class M5Watcher(App):
         # (prima collassava a 6 righe su Heatmap/Logs/Procs/Tent/Debug).
         # Sizing ora deciso solo da on_resize (cols/rows-based): l'header è
         # presenza identitaria costante che non saltella tra tab.
-        try:
-            title_bar = self.query_one("#title-bar", TitleBar)
-            if os.environ.get("M5W_NO_ASCII") == "1":
-                show = False
-            elif os.environ.get("M5W_FORCE_ASCII") == "1":
-                show = True
-            else:
-                show = self._rows >= 35 and self._cols >= 52
-            title_bar.show_ascii = show
-            title_bar.styles.height = 7 if self._rows < 35 else (16 if show else 9)
-        except Exception:
-            pass
+        # sess.1700: rimossa duplicazione TitleBar height/show_ascii — single
+        # source of truth è _apply_layout(), invocato da on_resize. Tab switch
+        # NON tocca header (era doppio repaint che amplificava il glitch
+        # visivo durante drag finestra che attraversa una nuova tab).
+        pass
 
     async def on_mount(self) -> None:
         self._init_tables()
+        # sess.1700: seed cache geometry pre-fetch — evita che il primo paint
+        # legga _layout_cache con valori boot stub (heat_cols=38) prima che
+        # arrivi il primo on_resize. Textual emette comunque un Resize ~entro
+        # un tick, ma _refresh_fast può girare prima e renderizzare heatmap
+        # con dimensione errata visibile per ~1s.
+        try:
+            self._cols = self.size.width or self._cols
+            self._rows = self.size.height or self._rows
+        except Exception:
+            pass
+        self._apply_layout(coalesce=False)
         self._center_tabs()
         await asyncio.to_thread(psutil.cpu_percent, percpu=True, interval=None)
         # Seed disk/net deltas
@@ -2403,9 +2488,11 @@ class M5Watcher(App):
         tt.add_columns(" ", "Process", "PID", "CPU %", "RAM MB", "Command", "🗑")
         lt = self.query_one("#log-table", DataTable)
         lt.add_columns("Time", " ", "Event", "Source", "Detail")
-        # sess.1602: Voice Agents call log — most recent first
+        # sess.1602+1683: Voice Agents call log — most recent first
+        # 9 col: TIME · TO · LEAD · AZIENDA · DUR · INTENT · SENT · OUTCOME · COST
         vt = self.query_one("#voiceagents-table", DataTable)
-        vt.add_columns("TIME", "AGENT", "TO", "LEAD", "DUR", "OUTCOME", "COST")
+        vt.add_columns("TIME", "TO", "LEAD", "AZIENDA", "DUR",
+                       "INTENT", "SENT", "OUTCOME", "COST")
         # sess.1607: Feed Tab — 4 DataTable severity-aware (populator fill rows)
         ot = self.query_one("#outstanding-table", DataTable)
         ot.add_columns("Cliente", "€", "D+", "Stato", "Note")
@@ -2954,6 +3041,14 @@ class M5Watcher(App):
         return mean(self._cpu_percents) if self._cpu_percents else 0.0
 
     async def action_force_refresh(self) -> None:
+        # sess.1683: invalida cache voice_agents_feed (TTL 5s default)
+        # per garantire R = refresh REALE, non cache hit.
+        try:
+            import data_sources as _ds
+            _ds._VOICE_FEED_TS = 0.0
+            _ds._VOICE_FEED_CACHE = {}
+        except Exception:
+            pass
         await self._refresh_fast()
         await self._refresh_slow()
         cpu  = self._cpu_avg()
@@ -3056,11 +3151,12 @@ class M5Watcher(App):
             self._py_logger.exception("voice agents render fail: %s", e)
 
     def _update_voice_agents_table(self, data: dict) -> None:
-        """Render TabPane Voice Agents — status row + table + sparkline + kill switch.
+        """Render TabPane Voice Agents — status + in-flight + recent + kill switch.
 
-        Empty state caldo, mai 'no data' freddo. Diff-cache via _update_if_changed
-        per status / spark / killswitch (Static); table re-popolata solo se
-        signature cambia (clear+add_row sono O(N) ma N<=16).
+        sess.1683 fix dati stale: legge outbox/ + calls/ + cost cache + health
+        cache + killed_by ground truth da setters.yaml.
+
+        Empty state caldo, mai 'no data' freddo. Diff-cache via _update_if_changed.
         """
         if not data:
             self._update_if_changed(
@@ -3072,9 +3168,11 @@ class M5Watcher(App):
         # ── Status row ────────────────────────────────────────────────────────
         enabled = data.get('enabled', False)
         agent_short = data.get('agent_id_short', '—')
+        killed_by = str(data.get('killed_by') or '').strip()
+        killed_at = str(data.get('killed_at') or '').strip()
         en_badge = (
-            f"[bold {LIME}]✅ ENABLED[/]" if enabled
-            else f"[bold {DIM}]🔴 DISABLED[/]"
+            f"[bold {LIME}]🟢 ENABLED[/]" if enabled
+            else f"[bold {RED}]🔴 DISABLED[/]"
         )
         today = int(data.get('today_calls', 0))
         cap = int(data.get('cap_calls_per_day', 80))
@@ -3090,7 +3188,6 @@ class M5Watcher(App):
             budget_color = YELLOW
         else:
             budget_color = HOT_PINK
-        # Mini gauge 10-cell: filled vs empty bar.
         gauge_filled = max(0, min(10, int(round(budget_pct / 10.0))))
         gauge = (
             f"[{budget_color}]" + "█" * gauge_filled + "[/]" +
@@ -3099,45 +3196,197 @@ class M5Watcher(App):
 
         optout_n = int(data.get('optout_count', 0))
         optout_color = LIME if optout_n == 0 else (DIM if optout_n < 5 else ORANGE)
+        in_flight = data.get('in_flight') or []
+        in_flight_count = int(data.get('in_flight_count', len(in_flight)))
+        recent = data.get('recent_calls') or []
+        dlq = int(data.get('dlq_count', 0))
+        health_alerts = data.get('health_alerts') or []
 
         status_lines = [
             f"[bold {WHITE}]Agent[/] {en_badge}  "
             f"[{DIM}]· id [/][{ELEC_BLUE}]{agent_short}[/]",
-            f"[bold {WHITE}]Today[/]   "
+        ]
+        if not enabled and (killed_by or killed_at):
+            killed_line = (
+                f"  [bold {HOT_PINK}]🛑 Killed[/] "
+                f"[{ORANGE}]{killed_by[:80]}[/]"
+            )
+            if killed_at:
+                killed_line += f"  [{DIM}]@ {killed_at}[/]"
+            status_lines.append(killed_line)
+        status_lines.extend([
+            f"[bold {WHITE}]Today[/]    "
             f"[{cap_color}]{today:>3}[/] [{DIM}]/ {cap}[/]   "
-            f"[{DIM}]({cap_pct:.0f}% volume cap)[/]",
-            f"[bold {WHITE}]Budget[/]  "
+            f"[{DIM}]({cap_pct:.0f}% volume cap)[/]   "
+            f"[bold {WHITE}]In-flight[/] [{ELEC_BLUE}]{in_flight_count}[/]   "
+            f"[bold {WHITE}]DLQ[/] "
+            f"[{LIME if dlq == 0 else HOT_PINK}]{dlq}[/]",
+            f"[bold {WHITE}]Budget[/]   "
             f"[{budget_color}]${budget_mtd:6.2f}[/] [{DIM}]/ ${budget_max:.0f}[/]   "
             f"{gauge}  [{budget_color}]{budget_pct:>5.1f}%[/]",
-            f"[bold {WHITE}]Opt-out[/] "
-            f"[{optout_color}]{optout_n}[/] [{DIM}]numeri permanenti[/]",
-        ]
+            f"[bold {WHITE}]Opt-out[/]  "
+            f"[{optout_color}]{optout_n}[/] [{DIM}]numeri permanenti[/]   "
+            f"[bold {WHITE}]Spike 24h[/] [{DIM}]{data.get('optout_24h', 0)}/{0 if not in_flight else len(in_flight)} ({data.get('optout_spike_pct', 0):.0f}%)[/]",
+        ])
+        if health_alerts:
+            for ha in health_alerts[:3]:
+                status_lines.append(
+                    f"  [bold {YELLOW}]⚠ Health[/]  [{ORANGE}]{ha[:90]}[/]"
+                )
         status_box = "\n".join(status_lines)
         self._update_if_changed("voiceagents-status", status_box)
 
-        # ── DataTable: live calls (max 16, newest first) ──────────────────────
-        vt = self.query_one("#voiceagents-table", DataTable)
-        calls = data.get('calls', [])
-        # Signature-based skip: ricostruisci solo se cambia.
-        sig = ";".join(
-            f"{c['ts_sort']:.0f}|{c['outcome']}|{c['duration_s']}|{c['cost_usd']:.4f}"
-            for c in calls
+        # ── KPI STRIP — funnel + intent mix + sentiment (sess.1683) ───────────
+        fs = data.get('funnel_stats') or {}
+        f_calls = int(fs.get('calls', 0))
+        f_conn = int(fs.get('connected', 0))
+        f_qual = int(fs.get('qualified', 0))
+        f_book = int(fs.get('booked', 0))
+        avg_dur_s = float(fs.get('avg_dur_s', 0.0))
+        avg_dur_str = (
+            f"{int(avg_dur_s)//60}m{int(avg_dur_s)%60:02d}s"
+            if avg_dur_s >= 60
+            else f"{int(avg_dur_s)}s"
         )
+        avg_cost_book = float(fs.get('avg_cost_per_booked', 0.0))
+        cost_str = f"${avg_cost_book:.2f}" if f_book > 0 else f"[{DIM}]n/a[/]"
+        # Color funnel: booked rate >=10% LIME, >=5% YELLOW, else DIM
+        book_pct = float(fs.get('pct_booked', 0.0))
+        funnel_color = LIME if book_pct >= 10 else (YELLOW if book_pct >= 5 else DIM)
+        funnel_line = (
+            f"[bold {ORANGE}]🎯 FUNNEL[/]  "
+            f"[{WHITE}]Calls[/] [{ELEC_BLUE}]{f_calls}[/] → "
+            f"[{WHITE}]Conn[/] [{ELEC_BLUE}]{f_conn}[/] "
+            f"[{DIM}]({fs.get('pct_connected', 0):.0f}%)[/] → "
+            f"[{WHITE}]Qual[/] [{ELEC_BLUE}]{f_qual}[/] "
+            f"[{DIM}]({fs.get('pct_qualified', 0):.0f}%)[/] → "
+            f"[{WHITE}]Booked[/] [bold {funnel_color}]{f_book}[/] "
+            f"[{funnel_color}]({book_pct:.0f}%)[/]   "
+            f"[{DIM}]·[/]  [bold {WHITE}]Avg dur[/] [{ELEC_BLUE}]{avg_dur_str}[/]   "
+            f"[{DIM}]·[/]  [bold {WHITE}]Cost/booked[/] [{ELEC_BLUE}]{cost_str}[/]"
+        )
+        self._update_if_changed("voiceagents-funnel", funnel_line)
+
+        # Intent mix line
+        mix = fs.get('intent_mix') or {}
+        # Mostra solo intent con count > 0, ordinati per count desc
+        mix_items = [(k, v) for k, v in mix.items() if isinstance(v, dict) and v.get('count', 0) > 0]
+        mix_items.sort(key=lambda x: -x[1].get('count', 0))
+        if mix_items:
+            mix_parts = []
+            for label, info in mix_items[:6]:
+                cnt = info.get('count', 0)
+                pct = info.get('pct', 0.0)
+                emo = info.get('emoji', '·')
+                # color per categoria
+                if label == 'booked':
+                    c = LIME
+                elif label == 'qualified':
+                    c = ORANGE
+                elif label in ('rejected', 'noise'):
+                    c = HOT_PINK
+                elif label in ('objection', 'hangup'):
+                    c = YELLOW
+                else:
+                    c = DIM
+                mix_parts.append(
+                    f"{emo} [{c}]{label}[/] [{ELEC_BLUE}]{cnt}[/] "
+                    f"[{DIM}]({pct:.0f}%)[/]"
+                )
+            intent_line = (
+                f"[bold {ORANGE}]🧭 INTENT MIX[/]  " + "  · ".join(mix_parts)
+            )
+        else:
+            intent_line = (
+                f"[bold {ORANGE}]🧭 INTENT MIX[/]  "
+                f"[{DIM}]Nessuna call oggi — in attesa[/]"
+            )
+        self._update_if_changed("voiceagents-intent", intent_line)
+
+        # Sentiment row
+        sent_avg = float(fs.get('sentiment_avg', 0.0))
+        sent_trend = fs.get('sentiment_trend_7gg', '·' * 7)
+        if sent_avg >= 0.2:
+            sent_color = LIME
+            sent_glyph = "😊"
+        elif sent_avg >= 0.0:
+            sent_color = ELEC_BLUE
+            sent_glyph = "🙂"
+        elif sent_avg >= -0.2:
+            sent_color = YELLOW
+            sent_glyph = "😐"
+        else:
+            sent_color = HOT_PINK
+            sent_glyph = "☹️"
+        sent_sign = "+" if sent_avg >= 0 else ""
+        sentiment_line = (
+            f"[bold {ORANGE}]{sent_glyph} SENTIMENT[/]  "
+            f"[{WHITE}]avg[/] [bold {sent_color}]{sent_sign}{sent_avg:.2f}[/]  "
+            f"[{DIM}]·[/]  [{WHITE}]trend 7gg[/] [{ELEC_BLUE}]{sent_trend}[/]"
+        )
+        self._update_if_changed("voiceagents-sentiment", sentiment_line)
+
+        # ── DataTable unificata: IN-FLIGHT (top) + RECENT completed (bottom) ──
+        # 9 colonne: TIME · TO · LEAD · AZIENDA · DUR · INTENT · SENT · OUTCOME · COST
+        vt = self.query_one("#voiceagents-table", DataTable)
+        recent_calls = data.get('recent_calls') or data.get('calls', [])[:5]
+        # Signature: in-flight (id+age sec coarse) + recent (ts+outcome+intent+sent).
+        in_flight_sig = ";".join(
+            f"{r['call_id']}|{r['status']}|{int(r['age_s'] / 5)}"
+            for r in in_flight
+        )
+        recent_sig = ";".join(
+            f"{c['ts_sort']:.0f}|{c['outcome']}|{c['duration_s']}|"
+            f"{c['cost_usd']:.4f}|{c.get('intent_label', '')}|{c.get('sentiment', 0):.2f}"
+            for c in recent_calls
+        )
+        sig = f"IF[{in_flight_sig}]||RC[{recent_sig}]"
         if self._render_cache.get("voiceagents-table-sig") != sig:
             self._render_cache["voiceagents-table-sig"] = sig
             vt.clear()
-            if not calls:
+            # Helper empty cell
+            empty = f"[{DIM}]—[/]"
+            # Section A — IN-FLIGHT divider + rows
+            if in_flight:
+                # Divider span: usiamo solo cella LEAD per il banner
                 vt.add_row(
-                    f"[{DIM}]—[/]",
-                    f"[{DIM}]—[/]",
-                    f"[{DIM}]—[/]",
-                    f"[italic {DIM}]Nessuna call ancora — Marco è in attesa del primo dispatch[/]",
-                    f"[{DIM}]—[/]",
-                    f"[{DIM}]—[/]",
-                    f"[{DIM}]—[/]",
+                    "", "",
+                    f"[bold {ELEC_BLUE}]━━━ 📞 IN-FLIGHT ({len(in_flight)}) ━━━━━━━━━━━━━━━[/]",
+                    "", "", "", "", "", "",
+                )
+                for r in in_flight:
+                    status_label = r['status']
+                    if status_label == 'spawned':
+                        status_cell = f"[bold {YELLOW}]◌[/] [{YELLOW}]spawned[/]"
+                    elif status_label == 'dispatched':
+                        status_cell = f"[bold {ELEC_BLUE}]◐[/] [{ELEC_BLUE}]dispatched[/]"
+                    else:
+                        status_cell = f"[{DIM}]· {status_label}[/]"
+                    vt.add_row(
+                        f"[{DIM}]{r['age']}[/]",
+                        f"[{WHITE}]{r['phone_masked']}[/]",
+                        f"{r['lead']}",
+                        empty,
+                        empty,
+                        f"[{DIM}]—[/]",
+                        f"[{DIM}]·[/]",
+                        status_cell,
+                        f"[{DIM}]r{r['retry']}[/]",
+                    )
+            # Section B — RECENT completed divider + rows
+            vt.add_row(
+                "", "",
+                f"[bold {LIME}]━━━ ✅ RECENT (last {len(recent_calls)}) ━━━━━━━━━━━━━━━[/]",
+                "", "", "", "", "", "",
+            )
+            if not recent_calls:
+                vt.add_row(
+                    empty, empty,
+                    f"[italic {DIM}]Nessuna call completata — solo dispatched in volo[/]",
+                    empty, empty, empty, empty, empty, empty,
                 )
             else:
-                for c in calls:
+                for c in recent_calls:
                     dur_s = c['duration_s']
                     dur_str = f"{dur_s//60}m{dur_s%60:02d}s" if dur_s >= 60 else f"{dur_s}s"
                     outcome_label = c['outcome']
@@ -3147,27 +3396,86 @@ class M5Watcher(App):
                         outcome_cell = f"[bold {HOT_PINK}]●[/] [{HOT_PINK}]NO[/]"
                     else:
                         outcome_cell = f"[{DIM}]·  ?[/]"
-                    cost_str = f"${c['cost_usd']:.3f}" if c['cost_usd'] > 0 else f"[{DIM}]—[/]"
+                    cost_str_cell = f"${c['cost_usd']:.3f}" if c['cost_usd'] > 0 else empty
+                    # Intent cell con emoji + label colorata
+                    intent_label = c.get('intent_label', 'unknown')
+                    intent_emoji = c.get('intent_emoji', '·')
+                    if intent_label == 'booked':
+                        ic = LIME
+                    elif intent_label == 'qualified':
+                        ic = ORANGE
+                    elif intent_label in ('rejected', 'noise'):
+                        ic = HOT_PINK
+                    elif intent_label in ('objection', 'hangup'):
+                        ic = YELLOW
+                    elif intent_label == 'callback':
+                        ic = ELEC_BLUE
+                    else:
+                        ic = DIM
+                    intent_cell = f"{intent_emoji} [{ic}]{intent_label}[/]"
+                    # Sentiment cell
+                    sent_v = c.get('sentiment')
+                    if sent_v is None or abs(sent_v) < 0.05:
+                        sent_cell = f"[{DIM}]·[/]"
+                    else:
+                        if sent_v >= 0.3:
+                            sc = LIME
+                        elif sent_v >= 0.0:
+                            sc = ELEC_BLUE
+                        elif sent_v >= -0.3:
+                            sc = YELLOW
+                        else:
+                            sc = HOT_PINK
+                        sign = "+" if sent_v > 0 else ""
+                        sent_cell = f"[{sc}]{sign}{sent_v:.1f}[/]"
+
+                    # Lead+azienda fallback
+                    lead_disp = c.get('lead') or '—'
+                    if lead_disp == '—' or not lead_disp.strip():
+                        lead_cell = empty
+                    else:
+                        lead_cell = lead_disp
+                    azienda_disp = c.get('azienda') or '—'
+                    if azienda_disp == '—' or not azienda_disp.strip():
+                        azienda_cell = empty
+                    else:
+                        azienda_cell = azienda_disp
+
                     vt.add_row(
                         f"[{DIM}]{c['time']}[/]",
-                        f"[{ELEC_BLUE}]{c['agent']}[/]",
                         f"[{WHITE}]{c['to_masked']}[/]",
-                        f"{c['lead']}",
+                        lead_cell,
+                        f"[{DIM}]{azienda_cell}[/]",
                         f"[{ELEC_BLUE}]{dur_str:>7}[/]",
+                        intent_cell,
+                        sent_cell,
                         outcome_cell,
-                        cost_str,
+                        cost_str_cell,
                     )
 
-        # ── Sparkline 7gg ─────────────────────────────────────────────────────
+        # ── Sparkline 7gg COUNT ───────────────────────────────────────────────
         spark = data.get('sparkline_7d', '·' * 7)
         spark_counts = data.get('sparkline_counts', [0] * 7)
         total_7d = sum(spark_counts)
         spark_line = (
-            f"[bold {ORANGE}]📈 7gg[/]  "
+            f"[bold {ORANGE}]📈 7gg call[/]  "
             f"[{ELEC_BLUE}]{spark}[/]  "
             f"[{DIM}]· {total_7d} call totali · max {max(spark_counts) if spark_counts else 0}/gg[/]"
         )
         self._update_if_changed("voiceagents-spark", spark_line)
+
+        # ── Sparkline 7gg SENTIMENT ───────────────────────────────────────────
+        sent_spark = data.get('sentiment_sparkline_7d', '·' * 7)
+        sent_daily = data.get('sentiment_daily_avg', [0.0] * 7)
+        # Last day non-zero sentiment for display
+        sent_last = sent_daily[-1] if sent_daily else 0.0
+        sent_last_sign = "+" if sent_last >= 0 else ""
+        spark_sent_line = (
+            f"[bold {ORANGE}]💬 7gg sent[/]  "
+            f"[{ELEC_BLUE}]{sent_spark}[/]  "
+            f"[{DIM}]· today {sent_last_sign}{sent_last:.2f} avg[/]"
+        )
+        self._update_if_changed("voiceagents-spark-sent", spark_sent_line)
 
         # ── Kill switch panel ─────────────────────────────────────────────────
         kill_status = data.get('kill_switch_status', [])

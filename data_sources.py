@@ -1254,10 +1254,17 @@ from datetime import datetime as _dt, timezone as _tz, timedelta as _td
 
 _VOICE_TELEMETRY_DIR = Path.home() / ".local" / "share" / "polpo_voice_agent"
 _VOICE_CALLS_DIR     = _VOICE_TELEMETRY_DIR / "calls"
+_VOICE_OUTBOX_DIR    = _VOICE_TELEMETRY_DIR / "outbox"      # sess.1683 — call dispatched in volo
+_VOICE_DLQ_DIR       = _VOICE_TELEMETRY_DIR / "dlq"         # sess.1683 — dead letter queue
+_VOICE_DIGESTS_DIR   = _VOICE_TELEMETRY_DIR / "digests"     # sess.1683 — daily JSON digests
 _VOICE_OPTOUT_FILE   = _VOICE_TELEMETRY_DIR / "optout.jsonl"
 _VOICE_HISTORY_FILE  = _VOICE_TELEMETRY_DIR / "call_history.jsonl"
 _VOICE_POLICY_FILE   = Path.home() / ".config" / "astra" / "voice_agent_hybrid_policy.yaml"
 _VOICE_SETTERS_FILE  = Path.home() / ".config" / "astra" / "setters.yaml"
+_VOICE_COST_CACHE    = Path("/tmp/polpo_voice_agent_cost.json")    # sess.1683 — cost_watchdog
+_VOICE_HEALTH_CACHE  = Path("/tmp/polpo_voice_agent_health.json")  # sess.1683 — health_check.py
+_VOICE_LIVE_CALL     = Path("/tmp/polpo_marco_live.json")          # sess.1683 — call_watcher_llm.py (live, NO cache)
+_VOICE_ACTIVE_CACHE  = Path("/tmp/polpo_voice_agent.json")         # sess.1683 — statusline live
 
 _VOICE_FEED_CACHE: dict = {}
 _VOICE_FEED_TS:    float = 0.0
@@ -1339,54 +1346,252 @@ def _voice_sparkline(counts: list[int]) -> str:
     return "".join(bars[int((c - mn) / (mx - mn) * 7)] for c in counts)
 
 
-def voice_agents_feed() -> dict:
-    """Aggrega telemetria voice agent per la TabPane Voice Agents (sess.1602).
+def _voice_relative_age(seconds: float) -> str:
+    """Human-friendly age: '2s ago', '14m ago', '3h ago'."""
+    if seconds < 0:
+        return "now"
+    if seconds < 60:
+        return f"{int(seconds)}s ago"
+    if seconds < 3600:
+        return f"{int(seconds / 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds / 3600)}h ago"
+    return f"{int(seconds / 86400)}d ago"
 
-    Returns dict normalizzato pronto per render:
-      {
-        'enabled': bool, 'agent_id': str, 'agent_id_short': str,
-        'phone_masked': str,
-        'today_calls': int, 'cap_calls_per_day': int,
-        'budget_mtd_usd': float, 'budget_max_usd': float, 'budget_pct': float,
-        'optout_count': int,
-        'calls': [ { 'time', 'agent', 'to_masked', 'lead', 'duration_s',
-                     'status', 'outcome', 'cost_usd', 'ts_sort' }, ... ],  # latest first
-        'sparkline_7d': str,           # 7 char Unicode
-        'sparkline_counts': [int]*7,   # raw counts oldest→newest
-        'kill_switch_status': [
-            { 'reason': str, 'state': 'ok'|'warn'|'fired', 'detail': str }
-        ],
-        'errors': [str],
-      }
+
+def _voice_load_json(path: Path) -> dict:
+    """Load JSON file safely → {} se manca/invalid."""
+    if not path.exists():
+        return {}
+    try:
+        return _json.loads(path.read_text()) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _voice_read_live_call() -> dict:
+    """Lettura LIVE call snapshot (sess.1683) — `/tmp/polpo_marco_live.json`.
+
+    Scritto ogni 2s da `~/scripts/voice_agent/call_watcher_llm.py`. NON cached
+    nel _VOICE_FEED_CACHE: deve essere fresh per renderizzare durata che scorre
+    e transcript live in m5-watcher.
+
+    Returns:
+      - dict raw da JSON se file presente e valido
+      - {is_live: False, status: 'watcher_offline', message: ...} se assente/corrotto
+    """
+    if not _VOICE_LIVE_CALL.exists():
+        return {
+            'is_live': False,
+            'status': 'watcher_offline',
+            'message': 'call_watcher_llm.py not running — no /tmp/polpo_marco_live.json',
+        }
+    try:
+        data = _json.loads(_VOICE_LIVE_CALL.read_text())
+        if not isinstance(data, dict):
+            return {'is_live': False, 'status': 'idle', 'message': 'malformed snapshot'}
+        # Stamp ts_age_s per render "X ago" robust
+        ts_str = data.get('ts', '')
+        ts_dt = _voice_parse_iso(ts_str) if ts_str else None
+        if ts_dt:
+            age = (_dt.now(_tz.utc) - ts_dt).total_seconds()
+            data['_age_s'] = max(0.0, age)
+            data['_stale'] = age > 3600  # > 60min
+        else:
+            data['_age_s'] = 0.0
+            data['_stale'] = False
+        return data
+    except (OSError, ValueError) as e:
+        return {
+            'is_live': False,
+            'status': 'idle',
+            'message': f'snapshot read error: {e}',
+        }
+
+
+# ── sess.1683 enrichment: intent detection + sentiment lexicon ────────────────
+_INTENT_BOOKED_KW   = ("appuntamento", "fissato", "fissata", "booked", "scheduled",
+                       "discovery", "prenotato", "calendarizzato")
+_INTENT_QUAL_KW     = ("interessato", "qualified", "interested", "booking",
+                       "interesse", "valuteremo", "approfondire", "richiamare")
+_INTENT_REJECT_KW   = ("non interessato", "non chiamatemi", "rifiuta", "rifiutato",
+                       "non mi interessa", "lasciate stare", "non chiamate")
+_INTENT_OBJECTION_KW = ("troppo caro", "costo", "obiezione", "ci penso", "non ho tempo",
+                        "mandate email", "mandate mail", "no grazie")
+_INTENT_CALLBACK_KW = ("callback", "richiamare", "richiami", "richiamatemi",
+                       "richiamare più tardi", "call back")
+
+_SENT_POS_KW = ("sì", "perfetto", "bene", "interessante", "ottimo", "certo",
+                "va bene", "grazie", "molto bene", "fantastico", "esatto",
+                "d'accordo", "volentieri")
+_SENT_NEG_KW = ("no", "non", "basta", "lasci", "scocciatura", "sbagli",
+                "infastidito", "spam", "non chiami", "non mi interessa")
+
+
+def _detect_intent(call: dict) -> tuple[str, str]:
+    """Classifica intent call → (label, emoji). Lexicon-based, no LLM.
+
+    Priorità: booked > qualified > rejected > objection > callback > noise/hangup.
+    """
+    summary = (call.get("summary") or "").lower()
+    term = (call.get("termination_reason") or "").lower()
+    dur = int(call.get("duration_seconds") or call.get("duration_s") or 0)
+    status = (call.get("status") or "").lower()
+
+    # Booked: end_call tool + summary contiene booking keyword
+    if "end_call" in term and any(k in summary for k in _INTENT_BOOKED_KW):
+        return ("booked", "✅")
+    # Rejected esplicito
+    if any(k in summary for k in _INTENT_REJECT_KW):
+        return ("rejected", "❌")
+    # Qualified
+    if any(k in summary for k in _INTENT_QUAL_KW):
+        return ("qualified", "🔥")
+    # Objection
+    if any(k in summary for k in _INTENT_OBJECTION_KW):
+        return ("objection", "⚠")
+    # Callback
+    if any(k in summary for k in _INTENT_CALLBACK_KW):
+        return ("callback", "📞")
+    # Hard fail: quota / errore upstream → noise
+    if status == "failed" and dur < 10:
+        return ("noise", "❌")
+    if dur < 10:
+        return ("noise", "❌")
+    if dur < 60:
+        return ("hangup", "⚠")
+    return ("unknown", "·")
+
+
+def _sentiment(call: dict) -> float:
+    """Sentiment lexicon-based dai messaggi user del transcript.
+
+    Returns float ~ [-1.0, +1.0] (amplifica × 10 normalizzato per len).
+    Transcript vuoto → 0.0.
+    """
+    transcript = call.get("transcript") or []
+    if not isinstance(transcript, list) or not transcript:
+        return 0.0
+    user_msgs: list[str] = []
+    for t in transcript:
+        if isinstance(t, dict) and t.get("role") == "user":
+            msg = t.get("message") or ""
+            if msg:
+                user_msgs.append(str(msg).lower())
+    if not user_msgs:
+        return 0.0
+    text = " ".join(user_msgs)
+    pos = sum(text.count(w) for w in _SENT_POS_KW)
+    neg = sum(text.count(w) for w in _SENT_NEG_KW)
+    total_words = max(1, len(text.split()))
+    raw = (pos - neg) / total_words * 10.0
+    # Clamp [-1.0, +1.0]
+    return round(max(-1.0, min(1.0, raw)), 2)
+
+
+def _sentiment_glyph(s: float | None) -> str:
+    """Format sentiment per cella tabella. None / 0 → '·'."""
+    if s is None:
+        return "·"
+    if abs(s) < 0.05:
+        return "·"
+    sign = "+" if s > 0 else ""
+    return f"{sign}{s:.1f}"
+
+
+def voice_agents_feed() -> dict:
+    """Aggrega telemetria voice agent per la TabPane Voice Agents (sess.1602+1683).
+
+    Sorgenti live (sess.1683 fix dati stale):
+      - ~/.config/astra/setters.yaml (ai_setter.{enabled, killed_by, killed_at, batch_daily_limit})
+      - ~/.local/share/polpo_voice_agent/outbox/*.json (call IN-FLIGHT)
+      - ~/.local/share/polpo_voice_agent/calls/*.json (telemetry COMPLETED)
+      - ~/.local/share/polpo_voice_agent/dlq/*.json (dead letter queue)
+      - ~/.local/share/polpo_voice_agent/optout.jsonl
+      - /tmp/polpo_voice_agent_cost.json (cost_watchdog cache)
+      - /tmp/polpo_voice_agent_health.json (health_check)
+
+    Returns dict normalizzato — vedi `out` block in fondo.
     """
     global _VOICE_FEED_CACHE, _VOICE_FEED_TS
     now_mono = _time.monotonic()
     if now_mono - _VOICE_FEED_TS < _VOICE_FEED_TTL and _VOICE_FEED_CACHE:
-        return _VOICE_FEED_CACHE
+        # Cache hit: ricicla payload pesante MA refresh `live_call` SEMPRE
+        # (call_watcher_llm.py scrive ogni 2s, deve apparire fresco anche
+        # quando il resto del feed è ancora valido a TTL).
+        cached = dict(_VOICE_FEED_CACHE)
+        cached['live_call'] = _voice_read_live_call()
+        return cached
 
     errors: list[str] = []
+    now_utc = _dt.now(_tz.utc)
+    today_utc = now_utc.date()
+    month_first_utc = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    seven_days_ago = today_utc - _td(days=6)
 
-    # ── 1. Setters config (ai_setter block) ───────────────────────────────────
+    # ── 1. Setters config (ai_setter block) — kill switch ground truth ────────
     setters = _voice_load_yaml(_VOICE_SETTERS_FILE)
     ai_setter = _safe_dict(setters, 'ai_setter')
     agent_id     = str(ai_setter.get('agent_id') or '').strip()
     phone_id     = str(ai_setter.get('phone_number_id') or '').strip()
     setter_enabled = bool(ai_setter.get('enabled', False))
     enabled = setter_enabled and bool(agent_id)
-    agent_id_short = (agent_id[:8] + '…') if len(agent_id) > 9 else (agent_id or '—')
+    agent_id_short = (agent_id[:20] + '…') if len(agent_id) > 21 else (agent_id or '—')
     phone_masked   = _voice_mask_phone(phone_id) if phone_id else '—'
+    killed_by = str(ai_setter.get('killed_by') or '').strip()
+    killed_at = str(ai_setter.get('killed_at') or '').strip()
+    yaml_daily_limit = ai_setter.get('batch_daily_limit')
 
     # ── 2. Policy YAML (caps + kill switch triggers) ──────────────────────────
     policy = _voice_load_yaml(_VOICE_POLICY_FILE)
     volume_cfg = _safe_dict(policy, 'volume')
     budget_cfg = _safe_dict(policy, 'budget')
     kill_cfg   = _safe_dict(policy, 'kill_switch')
-    cap_calls_per_day = int(volume_cfg.get('max_calls_per_day', 80) or 80)
+    # Priorità: setters.yaml batch_daily_limit > policy.volume.max_calls_per_day > 80
+    if isinstance(yaml_daily_limit, (int, float)) and yaml_daily_limit > 0:
+        cap_calls_per_day = int(yaml_daily_limit)
+    else:
+        cap_calls_per_day = int(volume_cfg.get('max_calls_per_day', 80) or 80)
     budget_max_usd    = float(budget_cfg.get('max_monthly_usd', 500) or 500)
     budget_alert_pct  = float(budget_cfg.get('alert_at_pct', 75) or 75)
     budget_hard_pct   = float(budget_cfg.get('hard_stop_at_pct', 100) or 100)
 
-    # ── 3. Calls telemetry (1 file per call in calls/) ────────────────────────
+    # ── 3. Outbox (IN-FLIGHT call dispatched) — sess.1683 ground truth ────────
+    in_flight: list[dict] = []
+    if _VOICE_OUTBOX_DIR.exists() and _VOICE_OUTBOX_DIR.is_dir():
+        try:
+            for p in _VOICE_OUTBOX_DIR.glob('*.json'):
+                try:
+                    rec = _json.loads(p.read_text())
+                    if not isinstance(rec, dict):
+                        continue
+                    status = str(rec.get('status') or '').lower()
+                    if status not in ('dispatched', 'spawned', 'pending'):
+                        continue
+                    ts = _voice_parse_iso(rec.get('updated_at') or rec.get('created_at') or '')
+                    age_s = (now_utc - ts).total_seconds() if ts else 0.0
+                    dyn = rec.get('dynamic_vars') or {}
+                    lead_name = str(dyn.get('NOME_LEAD') or '').strip()
+                    azienda = str(dyn.get('NOME_AZIENDA') or '').strip()
+                    label = (azienda or lead_name or '—')[:24]
+                    in_flight.append({
+                        'call_id':   str(rec.get('call_id') or '')[:24],
+                        'phone_masked': _voice_mask_phone(str(rec.get('phone') or '')),
+                        'lead':      label,
+                        'status':    status,
+                        'age':       _voice_relative_age(age_s),
+                        'age_s':     age_s,
+                        'reason':    str(rec.get('reason') or ''),
+                        'retry':     int(rec.get('retry_count', 0) or 0),
+                    })
+                except (OSError, ValueError) as e:
+                    errors.append(f"outbox {p.name}: {e}")
+        except OSError as e:
+            errors.append(f"outbox dir scan: {e}")
+    in_flight.sort(key=lambda r: r['age_s'])  # newest first
+    in_flight = in_flight[:8]
+
+    # ── 4. Calls telemetry (COMPLETED — calls/*.json) ─────────────────────────
     calls_raw: list[dict] = []
     if _VOICE_CALLS_DIR.exists() and _VOICE_CALLS_DIR.is_dir():
         try:
@@ -1400,22 +1605,24 @@ def voice_agents_feed() -> dict:
         except OSError as e:
             errors.append(f"calls dir scan: {e}")
 
-    # Normalizza + sort newest-first
-    now_utc = _dt.now(_tz.utc)
-    today_utc = now_utc.date()
-    month_first_utc = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    seven_days_ago = today_utc - _td(days=6)   # 7 giorni include oggi
-
     calls_norm: list[dict] = []
     today_count = 0
-    budget_mtd = 0.0
-    daily_buckets: dict = {}   # date_iso → count
+    budget_mtd_from_calls = 0.0
+    daily_buckets: dict = {}
+    sent_buckets: dict = {}    # date → list[float] (per trend 7gg sentiment)
 
     for rec in calls_raw:
-        ts = _voice_parse_iso(rec.get('dispatch_ts_utc') or '')
+        # Schema retro-compat: dispatch_ts_utc o created_at o ended_at
+        ts = (
+            _voice_parse_iso(rec.get('dispatch_ts_utc') or '')
+            or _voice_parse_iso(rec.get('ended_at') or '')
+            or _voice_parse_iso(rec.get('created_at') or '')
+        )
         cost = 0.0
         try:
             cost = float((rec.get('cost_estimate') or {}).get('total_usd', 0) or 0)
+            if cost == 0.0:
+                cost = float(rec.get('cost_usd', 0) or 0)
         except (TypeError, ValueError):
             cost = 0.0
 
@@ -1426,7 +1633,7 @@ def voice_agents_feed() -> dict:
             if d == today_utc:
                 today_count += 1
             if ts >= month_first_utc:
-                budget_mtd += cost
+                budget_mtd_from_calls += cost
             if d >= seven_days_ago:
                 key = d.isoformat()
                 daily_buckets[key] = daily_buckets.get(key, 0) + 1
@@ -1435,40 +1642,177 @@ def voice_agents_feed() -> dict:
             ts_sort = 0.0
 
         outcome_raw = (rec.get('status') or '').strip().lower()
-        # call_successful può essere bool o stringa 'true'/'false'/'unknown'
         cs = rec.get('call_successful')
         if isinstance(cs, bool):
             cs_label = 'OK' if cs else 'NO'
-        elif isinstance(cs, str) and cs.lower() in ('true', 'yes', 'success'):
+        elif isinstance(cs, str) and cs.lower() in ('true', 'yes', 'success', 'booked'):
             cs_label = 'OK'
-        elif isinstance(cs, str) and cs.lower() in ('false', 'no', 'fail'):
+        elif isinstance(cs, str) and cs.lower() in ('false', 'no', 'fail', 'failed'):
             cs_label = 'NO'
         else:
-            cs_label = '?'
+            # Fallback: deduci da `status`
+            if outcome_raw in ('booked', 'success', 'completed_ok'):
+                cs_label = 'OK'
+            elif outcome_raw in ('failed', 'error', 'no_answer'):
+                cs_label = 'NO'
+            else:
+                cs_label = '?'
+
+        # Lead name: prima cerca `lead_name`, poi `dynamic_vars.NOME_LEAD`
+        lead_str = str(rec.get('lead_name') or '').strip()
+        if not lead_str:
+            dyn = rec.get('dynamic_vars') or {}
+            lead_str = str(dyn.get('NOME_LEAD') or '').strip()
+        # Azienda: company → dynamic_vars.NOME_AZIENDA
+        azienda_str = str(rec.get('company') or '').strip()
+        if not azienda_str:
+            dyn = rec.get('dynamic_vars') or {}
+            azienda_str = str(dyn.get('NOME_AZIENDA') or '').strip()
+
+        phone_field = rec.get('to_number') or rec.get('phone') or ''
+        # Skip phone se è un user_xxx ID ElevenLabs (non un numero E.164)
+        if isinstance(phone_field, str) and phone_field.startswith('user_'):
+            phone_field = ''
+
+        # Duration: schema-tolerant — duration_seconds (canonical) o duration_s (legacy)
+        dur_int = int(rec.get('duration_seconds') or rec.get('duration_s') or 0)
+
+        # Intent + sentiment enrichment (sess.1683)
+        intent_label, intent_emoji = _detect_intent(rec)
+        sent_val = _sentiment(rec)
 
         calls_norm.append({
-            'time':       ts_local_str,
-            'ts_sort':    ts_sort,
-            'agent':      str(rec.get('agent_id', ''))[:8] or '—',
-            'to_masked':  _voice_mask_phone(str(rec.get('to_number', '') or '')),
-            'lead':       str(rec.get('lead_name', '') or '—')[:24],
-            'duration_s': int(rec.get('duration_s', 0) or 0),
-            'status':     outcome_raw or '—',
-            'outcome':    cs_label,
-            'cost_usd':   cost,
-            'summary':    str(rec.get('summary', '') or '')[:80],
+            'time':         ts_local_str,
+            'ts_sort':      ts_sort,
+            'agent':        str(rec.get('agent_id', ''))[:8] or '—',
+            'to_masked':    _voice_mask_phone(str(phone_field)),
+            'lead':         (lead_str or '—')[:24],
+            'azienda':      (azienda_str or '—')[:18],
+            'duration_s':   dur_int,
+            'status':       outcome_raw or '—',
+            'outcome':      cs_label,
+            'cost_usd':     cost,
+            'summary':      str(rec.get('summary', '') or '')[:80],
+            'intent_label': intent_label,
+            'intent_emoji': intent_emoji,
+            'sentiment':    sent_val,
+            'term_reason':  str(rec.get('termination_reason') or '')[:80],
         })
 
-    calls_norm.sort(key=lambda c: c['ts_sort'], reverse=True)
+        # Sentiment bucket per trend 7gg
+        if ts and ts.date() >= seven_days_ago:
+            key = ts.date().isoformat()
+            sent_buckets.setdefault(key, []).append(sent_val)
 
-    # 7-day sparkline (oldest→newest)
+    calls_norm.sort(key=lambda c: c['ts_sort'], reverse=True)
+    recent_calls = calls_norm[:5]  # last 5 completed for "RECENT" panel
+
+    # 7-day sparkline COUNT (oldest→newest)
     sparkline_counts = []
     for i in range(6, -1, -1):
         d = (today_utc - _td(days=i)).isoformat()
         sparkline_counts.append(daily_buckets.get(d, 0))
     sparkline_str = _voice_sparkline(sparkline_counts)
 
-    # ── 4. Opt-out registry ───────────────────────────────────────────────────
+    # 7-day sparkline SENTIMENT avg (oldest→newest) — sess.1683
+    sentiment_daily_avg: list[float] = []
+    for i in range(6, -1, -1):
+        d = (today_utc - _td(days=i)).isoformat()
+        bucket = sent_buckets.get(d, [])
+        sentiment_daily_avg.append(sum(bucket) / len(bucket) if bucket else 0.0)
+    # Sparkline funziona su int → mappa [-1, +1] → [0, 7]
+    sent_int = [int(round((v + 1.0) * 3.5)) for v in sentiment_daily_avg]
+    sentiment_sparkline = _voice_sparkline(sent_int) if any(sent_buckets.values()) else "·" * 7
+
+    # ── FUNNEL STATS oggi (sess.1683) ─────────────────────────────────────────
+    today_calls_list = [
+        c for c in calls_norm
+        if c['ts_sort'] and _dt.fromtimestamp(c['ts_sort'], _tz.utc).date() == today_utc
+    ]
+    funnel_calls = len(today_calls_list)
+    # Connected: dur >= 30s AND status non hard-fail
+    connected_list = [
+        c for c in today_calls_list
+        if c['duration_s'] >= 30 and c['status'] not in ('failed', 'no_answer', 'error')
+    ]
+    funnel_conn = len(connected_list)
+    # Qualified: intent label in {qualified, booked} (booked è subset di qualified)
+    qualified_list = [
+        c for c in today_calls_list
+        if c['intent_label'] in ('qualified', 'booked')
+    ]
+    funnel_qual = len(qualified_list)
+    # Booked
+    booked_list = [c for c in today_calls_list if c['intent_label'] == 'booked']
+    funnel_booked = len(booked_list)
+
+    pct = lambda n, d: (n / d * 100.0) if d > 0 else 0.0  # noqa: E731
+    funnel_pct_conn = pct(funnel_conn, funnel_calls)
+    funnel_pct_qual = pct(funnel_qual, funnel_calls)
+    funnel_pct_booked = pct(funnel_booked, funnel_calls)
+
+    # Avg duration connected (secondi)
+    funnel_avg_dur_s = (
+        sum(c['duration_s'] for c in connected_list) / len(connected_list)
+    ) if connected_list else 0.0
+    # Avg cost per booked = sum cost oggi / max(1, booked)
+    today_total_cost = sum(c['cost_usd'] for c in today_calls_list)
+    funnel_avg_cost_per_booked = today_total_cost / max(1, funnel_booked)
+
+    # Intent mix (oggi) → counts + percentuali
+    intent_mix: dict[str, dict] = {}
+    for label in ('booked', 'qualified', 'objection', 'rejected', 'callback',
+                  'hangup', 'noise', 'unknown'):
+        n = sum(1 for c in today_calls_list if c['intent_label'] == label)
+        intent_mix[label] = {
+            'count': n,
+            'pct': pct(n, funnel_calls),
+            'emoji': next(
+                (c['intent_emoji'] for c in today_calls_list if c['intent_label'] == label),
+                {'booked': '✅', 'qualified': '🔥', 'objection': '⚠',
+                 'rejected': '❌', 'callback': '📞', 'hangup': '⚠',
+                 'noise': '❌', 'unknown': '·'}[label],
+            ),
+        }
+
+    # Sentiment avg oggi (solo connected)
+    sent_today = [c['sentiment'] for c in connected_list if c['sentiment'] is not None]
+    sentiment_avg_today = round(sum(sent_today) / len(sent_today), 2) if sent_today else 0.0
+
+    funnel_stats = {
+        'calls':              funnel_calls,
+        'connected':          funnel_conn,
+        'qualified':          funnel_qual,
+        'booked':             funnel_booked,
+        'pct_connected':      round(funnel_pct_conn, 1),
+        'pct_qualified':      round(funnel_pct_qual, 1),
+        'pct_booked':         round(funnel_pct_booked, 1),
+        'avg_dur_s':          round(funnel_avg_dur_s, 1),
+        'avg_cost_per_booked': round(funnel_avg_cost_per_booked, 2),
+        'intent_mix':         intent_mix,
+        'sentiment_avg':      sentiment_avg_today,
+        'sentiment_trend_7gg': sentiment_sparkline,
+        'sentiment_daily_avg': [round(v, 2) for v in sentiment_daily_avg],
+        'today_total_cost':   round(today_total_cost, 2),
+    }
+
+    # ── 5. DLQ count ──────────────────────────────────────────────────────────
+    dlq_count = 0
+    if _VOICE_DLQ_DIR.exists() and _VOICE_DLQ_DIR.is_dir():
+        try:
+            dlq_count = sum(1 for _ in _VOICE_DLQ_DIR.glob('*.json'))
+        except OSError:
+            pass
+
+    # ── 6. Cost cache (cost_watchdog → autoritativo se presente) ──────────────
+    cost_cache = _voice_load_json(_VOICE_COST_CACHE)
+    if cost_cache:
+        budget_mtd = float(cost_cache.get('spend_usd', budget_mtd_from_calls) or budget_mtd_from_calls)
+        budget_max_usd = float(cost_cache.get('budget_usd', budget_max_usd) or budget_max_usd)
+    else:
+        budget_mtd = budget_mtd_from_calls
+
+    # ── 7. Opt-out registry + spike 24h ───────────────────────────────────────
     optout_count = 0
     if _VOICE_OPTOUT_FILE.exists():
         try:
@@ -1479,7 +1823,6 @@ def voice_agents_feed() -> dict:
         except OSError as e:
             errors.append(f"optout read: {e}")
 
-    # opt-out spike 24h (per kill switch trigger spike >10% in 24h)
     optout_24h = 0
     calls_24h = 0
     if _VOICE_OPTOUT_FILE.exists():
@@ -1502,18 +1845,32 @@ def voice_agents_feed() -> dict:
         except OSError:
             pass
     optout_spike_pct = (optout_24h / calls_24h * 100.0) if calls_24h else 0.0
-
-    # ── 5. Budget pct ─────────────────────────────────────────────────────────
     budget_pct = (budget_mtd / budget_max_usd * 100.0) if budget_max_usd > 0 else 0.0
 
-    # ── 6. Kill switch status ─────────────────────────────────────────────────
+    # ── 8. Health alerts (health_check.py cache) ──────────────────────────────
+    health = _voice_load_json(_VOICE_HEALTH_CACHE)
+    health_alerts: list[str] = []
+    if health:
+        for a in (health.get('alerts') or []):
+            if isinstance(a, str):
+                health_alerts.append(a.strip())
+
+    # ── 9. Kill switch status (5 trigger canonici sess.1683) ──────────────────
+    # Se policy.yaml ha triggers usa quelli, altrimenti default 5-condition stub.
     triggers = _safe_list(kill_cfg, 'triggers')
+    if not triggers:
+        triggers = [
+            {'reason': '3+ Garante Privacy in 7gg'},
+            {'reason': 'Trustpilot 1-star >100 view in 24h'},
+            {'reason': 'spike opt-out >10% in 24h'},
+            {'reason': 'PEC complaint formale'},
+            {'reason': 'budget cap raggiunto'},
+        ]
     kill_status: list[dict] = []
     for trig in triggers:
         if not isinstance(trig, dict):
             continue
         reason = str(trig.get('reason', '?'))
-        # Heuristics di stato basate su segnali disponibili.
         state = 'ok'
         detail = '—'
         rl = reason.lower()
@@ -1545,6 +1902,8 @@ def voice_agents_feed() -> dict:
         'agent_id':          agent_id,
         'agent_id_short':    agent_id_short,
         'phone_masked':      phone_masked,
+        'killed_by':         killed_by,
+        'killed_at':         killed_at,
         'today_calls':       today_count,
         'cap_calls_per_day': cap_calls_per_day,
         'budget_mtd_usd':    round(budget_mtd, 2),
@@ -1555,12 +1914,24 @@ def voice_agents_feed() -> dict:
         'optout_count':      optout_count,
         'optout_24h':        optout_24h,
         'optout_spike_pct':  round(optout_spike_pct, 1),
+        'in_flight':         in_flight,
+        'in_flight_count':   len(in_flight),
+        'recent_calls':      recent_calls,
+        'dlq_count':         dlq_count,
+        'health_alerts':     health_alerts,
         'calls':             calls_norm[:16],
         'sparkline_7d':      sparkline_str,
         'sparkline_counts':  sparkline_counts,
+        'sentiment_sparkline_7d': sentiment_sparkline,
+        'sentiment_daily_avg':    [round(v, 2) for v in sentiment_daily_avg],
         'kill_switch_status': kill_status,
+        'funnel_stats':      funnel_stats,
         'errors':            errors,
     }
     _VOICE_FEED_CACHE = out
     _VOICE_FEED_TS = now_mono
-    return out
+    # sess.1683 LIVE CALL: NON entra nel cache — letto sempre fresh.
+    # Su cache hit (early return sopra) lo iniettiamo dopo lookup.
+    out_live = dict(out)
+    out_live['live_call'] = _voice_read_live_call()
+    return out_live

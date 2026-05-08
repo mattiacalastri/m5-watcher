@@ -82,6 +82,7 @@ import graph_widget
 import kpi_widget
 import health_widget   # sess.1582: Apple Health vitals (snapshot /tmp/polpo_health_live.json)
 import polpo_charts as pc_const   # sess.1508 round 3: shared constants (PRESSURE_*, ALERT_*)
+from plugin_loader import discover_plugins  # sess.1694: agentic plugins (advisor, ecc.)
 
 # ── Telemetry spine (sess.1508 round 4) ──────────────────────────────────────
 from metrics import (
@@ -2365,6 +2366,16 @@ class M5Watcher(App):
         # vector + trap fanno I/O caro (~500ms) — facciamoli mentre il KPI tab
         # è visibile, così non bloccano il primo switch a tab Logs.
         asyncio.create_task(self._prewarm_roadmap_cache())
+        # sess.1694: agentic plugins — scopri e aggiungi tab dinamicamente.
+        try:
+            tabbed = self.query_one(TabbedContent)
+            for plugin in discover_plugins():
+                try:
+                    await tabbed.add_pane(TabPane(plugin.label, plugin.widget_factory(), id=plugin.id))
+                except Exception as exc:
+                    self._py_logger.warning("plugin %s mount failed: %s", plugin.id, exc)
+        except Exception as exc:
+            self._py_logger.warning("discover_plugins failed: %s", exc)
 
     async def _prewarm_roadmap_cache(self) -> None:
         """Background prewarm — riempie le cache TTL dei 6 moduli roadmap."""

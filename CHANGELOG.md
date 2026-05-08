@@ -5,6 +5,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 
 ---
 
+## [Unreleased] — sess.1694 · 2026-05-08 · Agentic Advisor (plugin #1)
+
+### Added
+- **Plugin `plugins/claude_advisor.py`** — primo plugin agentic. Engine + Textual widget in unico file.
+  - Engine: legge `/tmp/polpo_m5_resources.json`, chiama Claude Haiku via LiteLLM proxy `proxy.astradigital.marketing` (vkey `vk-scripts-local`), output strutturato JSON `{verdict, headline, reasoning, action, confidence}` con verdetti `OPTIMAL/WATCH/ACT/CRITICAL`.
+  - Output persistente JSONL `~/.m5-watcher/advisor.jsonl` (append-only, ultima riga = corrente).
+  - Modes CLI: `--once` / `--loop` / `--tail [N]`.
+  - Widget Textual `AdvisorWidget`: tab `🤖 Advisor` (hotkey `a`), refresh 15s, color-coded verdict.
+  - Zero deps oltre stdlib (urllib).
+- **LaunchAgent `~/Library/LaunchAgents/com.polpo.m5-advisor.plist`** — daemon loop 60s, KeepAlive su crash, throttle 30s, log `/tmp/m5_advisor.{out,err}.log`.
+- **Plugin loader integration** — `app.py` ora chiama `discover_plugins()` in `on_mount` e mounta dinamicamente i `TabPane` plugin-supplied.
+
+### Fixed
+- `~/scripts/launch_m5_watcher.sh` — `python3 -m m5_watcher` (modulo inesistente) sostituito con `~/projects/m5-watcher/venv/bin/python .` (dir-as-script). Sotto Ghostty `--noprofile --norc` il bare `python3` cadeva su 3.14 senza `textual`.
+
+### Doctrine
+- **Plugin pattern**: engine + widget in singolo file plugin → coesione massima, file singolo deletable per disattivare la feature.
+- **Daemon ↔ Widget separation**: daemon scrive JSONL, widget legge JSONL → fail-safe indipendenti, JSONL leggibile anche da bot TG / statusline / scripts.
+- **Doctrine #1 della lista agentic chiusa**: m5-watcher esce da "observer puro" — primo loop LLM autonomo che produce raccomandazioni concrete.
+
+### Cost
+- ~700 token per ciclo Haiku (550 in / 150 out) → ≈$0.0009/ciclo · loop 60s = ≈$1.30/24h.
+
+---
+
 ## [Unreleased] — sess.1607 · 2026-05-07 · Feed Tab refactor
 
 ### Added

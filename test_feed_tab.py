@@ -78,7 +78,7 @@ class TestFeedPopulators(unittest.TestCase):
         fake_entries = [
             {"cliente": "Pietro Carpino", "amount": 2000, "days_aged": 12,
              "severity": "P0", "note": "fattura saldata"},
-            {"cliente": "Marco Borganti", "amount": 500, "days_aged": 3,
+            {"cliente": "Andrea Borganti", "amount": 500, "days_aged": 3,
              "severity": "P1", "note": "in attesa bonifico"},
             {"cliente": "Sabrina Brunelli", "amount": 800, "days_aged": None,
              "severity": "info", "note": ""},
@@ -151,7 +151,7 @@ class TestFeedPopulators(unittest.TestCase):
     # ──────────────────────────── FILAMENTS ────────────────────────────
     def test_populate_filaments_table_basic(self):
         fake_filaments = [
-            {"name": "Marco GEO voice agent", "severity": "P1",
+            {"name": "Andrea GEO voice agent", "severity": "P1",
              "stato": "agent_id pending", "deadline": "2026-05-08",
              "days_drift": 2, "is_resolved": False},
             {"name": "AAH Lupo activation", "severity": "info",

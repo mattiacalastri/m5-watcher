@@ -9,6 +9,11 @@ Drop-in widget per app.py m5-watcher. Non importa Textual a livello modulo
 (import-safe), espone una factory che ritorna un Static widget pronto da
 montare in un nuovo TabPane "📡 Bots".
 
+Sess.1703 redesign: passaggio da stringa Rich-markup → renderable Rich
+(Panel + Table.grid + Rule + Padding) per ottenere boxing/padding/margin
+reali. Allineato ai Polpo design tokens (polpo.tokens.json — mirror locale
+per preservare l'invariante import-safe).
+
 USO in app.py m5-watcher:
 
     from tg_bots_widget import TgBotsWidget, render_state
@@ -25,18 +30,33 @@ Standalone smoke (senza Textual):
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from rich.console import Group, RenderableType
+from rich.padding import Padding
+from rich.panel import Panel
+from rich.rule import Rule
+from rich.table import Table
+from rich.text import Text
+
 STATE_PATH = Path.home() / ".local" / "run" / "polpo-tg-watcher" / "state.json"
 
-# ── Polpo color palette (mirror app.py) ──────────────────────────────────────
-COLORS = {
-    "high":   "bold red",
-    "medium": "yellow",
-    "low":    "dim white",
-    "noise":  "grey50 strike",
+# ── Polpo tokens (mirror polpo.tokens.json — keep in sync) ───────────────────
+TEAL       = "#00d4aa"
+TEAL_DIM   = "#007a62"
+FG         = "#e6f1ff"
+DIM        = "#8a98ad"
+RED        = "#ff3366"
+YELLOW     = "#ffd400"
+GREEN      = "#5dffaa"
+CYAN       = "#00d9ff"
+
+SEV_STYLE = {
+    "high":   f"bold {RED}",
+    "medium": YELLOW,
+    "low":    GREEN,
+    "noise":  f"strike {DIM}",
 }
 SEV_GLYPH = {"high": "🔴", "medium": "🟡", "low": "🟢", "noise": "⚪"}
 
@@ -49,82 +69,163 @@ def load_state() -> Optional[dict]:
         return None
 
 
-def render_state(state: Optional[dict] = None, max_recent: int = 18) -> str:
-    """Build a Rich-markup string for the tab body. Pure function for testing."""
-    if state is None:
-        state = load_state()
+# ── Sub-renderables ──────────────────────────────────────────────────────────
+def _empty_state() -> RenderableType:
+    body = Text()
+    body.append("📡 ", style=TEAL)
+    body.append("TG Bots Watcher", style=f"bold {FG}")
+    body.append("  — daemon non attivo\n\n", style=DIM)
+    body.append("Avvia con:\n", style=YELLOW)
+    body.append("  python3 ~/scripts/polpo_tg_watcher_daemon.py\n\n", style=CYAN)
+    body.append("LaunchAgent:\n", style=YELLOW)
+    body.append("  launchctl load ~/Library/LaunchAgents/com.polpo.tg-bot-watcher.plist\n\n", style=CYAN)
+    body.append("File atteso: ", style=DIM)
+    body.append(str(STATE_PATH), style=CYAN)
+    return Panel(body, border_style=TEAL_DIM, padding=(1, 2))
 
-    if not state:
-        return (
-            "[dim]📡 [bold]TG Bots Watcher[/bold] — daemon non attivo[/dim]\n\n"
-            "[yellow]Avvia con:[/yellow]\n"
-            "  [cyan]python3 ~/scripts/polpo_tg_watcher_daemon.py[/cyan]\n\n"
-            "[yellow]LaunchAgent:[/yellow]\n"
-            "  [cyan]launchctl load ~/Library/LaunchAgents/com.polpo.tg-bot-watcher.plist[/cyan]\n\n"
-            "[dim]File atteso:[/dim] [cyan]" + str(STATE_PATH) + "[/cyan]"
+
+def _header(state: dict) -> RenderableType:
+    title = Text()
+    title.append("📡  ")
+    title.append("TG BOTS WATCHER", style=f"bold {TEAL}")
+
+    meta = Text()
+    meta.append("updated ", style=DIM)
+    meta.append(state.get("updated", "?"), style=FG)
+
+    title_row = Table.grid(expand=True)
+    title_row.add_column(justify="left")
+    title_row.add_column(justify="right")
+    title_row.add_row(title, meta)
+
+    sub = Text(
+        "Polpo Squad notification feed · severity-aware  ·  "
+        "ogni eco dei tentacoli passa qui prima di farsi rumore.",
+        style=f"italic {DIM}",
+    )
+
+    sev = state.get("by_severity", {})
+
+    def _badge(glyph: str, count: int, label: str, color: str) -> Text:
+        t = Text()
+        t.append(f"{glyph}  ", style=color)
+        t.append(str(count), style=f"bold {color}")
+        t.append(f" {label}", style=color)
+        return t
+
+    total = Text()
+    total.append("total  ", style=DIM)
+    total.append(str(state.get("total_seen", 0)), style=f"bold {FG}")
+
+    badges = Table.grid(padding=(0, 4))
+    for _ in range(5):
+        badges.add_column()
+    badges.add_row(
+        total,
+        _badge("🔴", sev.get("high", 0), "high", RED),
+        _badge("🟡", sev.get("medium", 0), "med", YELLOW),
+        _badge("🟢", sev.get("low", 0), "low", GREEN),
+        _badge("⚪", sev.get("noise", 0), "noise", DIM),
+    )
+
+    body = Group(title_row, Text(""), sub, Text(""), badges)
+    return Panel(body, border_style=TEAL_DIM, padding=(1, 2))
+
+
+def _section_header(label: str) -> RenderableType:
+    head = Text()
+    head.append("◇  ", style=f"bold {TEAL}")
+    head.append(label, style=f"bold {FG}")
+    return Group(head, Rule(style=TEAL_DIM, characters="─"))
+
+
+def _per_bot(state: dict) -> RenderableType:
+    by_bot = state.get("by_bot", {})
+    if not by_bot:
+        return Text()
+
+    table = Table.grid(padding=(0, 3))
+    table.add_column(style=CYAN, width=24, no_wrap=True)
+    table.add_column(justify="right", style=f"bold {FG}", width=4)
+    table.add_column(style=TEAL)
+
+    for bot, cnt in list(by_bot.items())[:6]:
+        bar = "▆" * min(cnt, 20)
+        table.add_row(bot, str(cnt), bar)
+
+    return Group(
+        _section_header("PER-BOT ACTIVITY"),
+        Padding(table, (1, 0, 0, 2)),
+    )
+
+
+def _recent(state: dict, max_recent: int) -> RenderableType:
+    recent = state.get("recent", [])[:max_recent]
+    if not recent:
+        return Text()
+
+    # 4 colonne: glyph+ts insieme · bot · tag chip · preview elastica
+    table = Table.grid(padding=(0, 1), expand=True)
+    table.add_column(min_width=22, no_wrap=True)                            # glyph + ts
+    table.add_column(min_width=18, no_wrap=True, overflow="ellipsis")       # bot
+    table.add_column(min_width=8,  no_wrap=True)                            # tag chip
+    table.add_column(ratio=1,      no_wrap=True, overflow="ellipsis")       # preview
+
+    for ev in recent:
+        sev = ev.get("severity", "low")
+        glyph = SEV_GLYPH.get(sev, "•")
+        ts = (ev.get("ts") or "")[:19].replace("T", " ")
+        bot = (ev.get("bot") or "?")[:18]
+        preview = (ev.get("preview") or "").replace("\n", " ⏎ ")
+
+        tags = ev.get("tags", [])
+        tag_chip = Text()
+        if "urgent" in tags:
+            tag_chip.append("urgent", style=f"bold {RED}")
+        elif "noise" in tags:
+            tag_chip.append("noise", style=f"strike {DIM}")
+        elif "verbose" in tags:
+            tag_chip.append("verbose", style=YELLOW)
+
+        when = Text()
+        when.append(f"{glyph}  ")
+        when.append(ts, style=DIM)
+
+        # Preview color: alta severità + noise restano segnati, gli altri body fg
+        preview_style = SEV_STYLE.get(sev, FG) if sev in ("high", "noise") else FG
+
+        table.add_row(
+            when,
+            Text(bot, style=CYAN),
+            tag_chip,
+            Text(preview, style=preview_style),
         )
 
-    lines = []
-
-    # Header
-    updated = state.get("updated", "?")
-    total = state.get("total_seen", 0)
-    by_sev = state.get("by_severity", {})
-
-    h_high = by_sev.get("high", 0)
-    h_med = by_sev.get("medium", 0)
-    h_low = by_sev.get("low", 0)
-    h_noise = by_sev.get("noise", 0)
-
-    lines.append(
-        f"[bold cyan]📡 TG Bots Watcher[/bold cyan]   "
-        f"[dim]updated[/dim] [white]{updated}[/white]   "
-        f"[dim]total[/dim] [bold white]{total}[/bold white]"
+    return Group(
+        _section_header("RECENT STREAM"),
+        Padding(table, (1, 0, 0, 2)),
     )
-    lines.append(
-        f"[red]🔴 high {h_high}[/red]  "
-        f"[yellow]🟡 med {h_med}[/yellow]  "
-        f"[green]🟢 low {h_low}[/green]  "
-        f"[grey50]⚪ noise {h_noise}[/grey50]"
+
+
+def build_renderable(state: Optional[dict] = None, max_recent: int = 18) -> RenderableType:
+    """Build a Rich renderable for the tab body. Pure function for testing."""
+    if state is None:
+        state = load_state()
+    if not state:
+        return _empty_state()
+    return Group(
+        _header(state),
+        Text(""),
+        _per_bot(state),
+        Text(""),
+        _recent(state, max_recent),
     )
-    lines.append("")
 
-    # Per-bot top
-    by_bot = state.get("by_bot", {})
-    if by_bot:
-        lines.append("[bold magenta]Per-bot[/bold magenta]")
-        for bot, cnt in list(by_bot.items())[:6]:
-            bar = "▆" * min(cnt, 20)
-            lines.append(f"  [cyan]{bot:<22}[/cyan] [bold]{cnt:>4}[/bold]  [dim cyan]{bar}[/dim cyan]")
-        lines.append("")
 
-    # Recent events
-    recent = state.get("recent", [])[:max_recent]
-    if recent:
-        lines.append("[bold magenta]Recent[/bold magenta]")
-        for ev in recent:
-            sev = ev.get("severity", "low")
-            color = COLORS.get(sev, "white")
-            glyph = SEV_GLYPH.get(sev, "•")
-            ts = (ev.get("ts") or "")[:19].replace("T", " ")
-            bot = (ev.get("bot") or "?")[:18]
-            preview = (ev.get("preview") or "").replace("\n", " ⏎ ")[:78]
-            tags = ev.get("tags", [])
-            tag_str = ""
-            if "urgent" in tags:
-                tag_str += "[bold red]\\[urgent][/bold red] "
-            if "noise" in tags:
-                tag_str += "[grey50]\\[noise][/grey50] "
-            if "verbose" in tags:
-                tag_str += "[yellow]\\[verbose][/yellow] "
-
-            lines.append(
-                f"  [{color}]{glyph} {ts}[/{color}] "
-                f"[bright_blue]{bot:<18}[/bright_blue] {tag_str}"
-                f"[white]{preview}[/white]"
-            )
-
-    return "\n".join(lines)
+def render_state(state: Optional[dict] = None, max_recent: int = 18) -> RenderableType:
+    """Backward-compatible alias. Returns a Rich renderable (was string until sess.1703).
+    Static.update() accetta entrambi, quindi i caller esistenti continuano a funzionare."""
+    return build_renderable(state, max_recent)
 
 
 # ── Textual widget wrapper (lazy import) ─────────────────────────────────────
@@ -138,6 +239,8 @@ try:
         DEFAULT_CSS = """
         TgBotsWidget {
             padding: 1 2;
+            margin: 0 0 1 0;
+            height: auto;
             content-align: left top;
         }
         """
@@ -153,7 +256,7 @@ try:
 
         def refresh_data(self) -> None:
             try:
-                self.update(render_state())
+                self.update(build_renderable())
             except Exception as e:
                 self.update(f"[red]TgBotsWidget error: {e}[/red]")
 
@@ -164,4 +267,5 @@ except ImportError:
 
 # ── Standalone smoke ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print(render_state())
+    from rich.console import Console
+    Console().print(build_renderable())

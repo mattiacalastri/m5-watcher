@@ -78,6 +78,7 @@ from rich.text import Text as RichText
 
 import data_sources as ds
 import vault_parser
+from polpo_heartbeat_widget import heartbeat_data as polpo_heartbeat_data, governance_signals_recent as polpo_governance_recent  # sess.1745 — voice + governance autonomous monitor
 import graph_widget
 import kpi_widget
 import health_widget   # sess.1582: Apple Health vitals (snapshot /tmp/polpo_health_live.json)
@@ -555,8 +556,22 @@ def _jread(name: str, default: str = "") -> str:
 
 
 def voice_data() -> dict:
-    """Read live voice state from ~/.local/run/jarvis/ — all file I/O, no subprocess."""
+    """Read live voice state from ~/.local/run/jarvis/ — all file I/O, no subprocess.
+
+    sess.1745: include polpo_heartbeat + governance_signals snapshot per render
+    sync-safe (zero I/O in render_voice → no UI lag).
+    """
     import struct as _struct
+
+    # Sess.1745 — heartbeat + governance snapshot async-safe (chiamato via to_thread)
+    try:
+        polpo_hb = polpo_heartbeat_data()
+    except Exception:
+        polpo_hb = {"stale": True, "age_s": 99999}
+    try:
+        polpo_gov = polpo_governance_recent(n=3)
+    except Exception:
+        polpo_gov = []
 
     state    = _jread("stt_state", "offline")
     engine   = _jread("stt_engine.txt", "—").upper()
@@ -615,6 +630,8 @@ def voice_data() -> dict:
         "ambient":    diag.get("cal_mean", "—"),
         "history":    history,
         "levels":     levels,
+        "polpo_heartbeat":  polpo_hb,    # sess.1745 — async-safe stash
+        "polpo_governance": polpo_gov,   # sess.1745 — async-safe stash
     }
 
 
@@ -801,6 +818,65 @@ def render_voice(vd: dict, level_w: int = 40) -> str:
         f"[{DEEP_PURPL}]THRESHOLD[/] [bold {FG}]{threshold}[/]   "
         f"[{TEAL}]AMBIENT[/] [bold {FG}]{ambient}[/]",
         "",
+    ]
+
+    # ── Polpo Heartbeat (sess.1745) — voice subsystem hardening monitor (zero I/O in render)
+    try:
+        hb = vd.get("polpo_heartbeat") or {"stale": True, "age_s": 99999}
+        if hb.get("stale", True):
+            age = hb.get("age_s", 0)
+            lines.append(f"  [{DIM}]POLPO HEARTBEAT[/]  [{DIM}]· stale {age}s[/]")
+        else:
+            stt_dot = f"[{LIME}]●[/] UP" if hb["stt_up"] else f"[{HOT_PINK}]●[/] DOWN"
+            mute = f"[{HOT_PINK}]LEAK[/]" if hb["mute_stale"] else f"[{LIME}]OK[/]"
+            f24 = hb["f24_days_left"]
+            f24_color = HOT_PINK if f24 < 4 else (DEEP_PURPL if f24 < 7 else LIME)
+            dirty = hb["scripts_dirty"]
+            dirty_color = HOT_PINK if dirty > 100 else (DEEP_PURPL if dirty > 30 else LIME)
+            age = hb.get("age_s", 0)
+            age_str = f"{age}s" if age < 60 else f"{age // 60}m"
+            ticks = hb.get("loop_history_n", 0)
+            alerts = (hb.get("alerts") or "").strip()
+
+            lines.append(f"  [{DIM}]POLPO HEARTBEAT[/]  [{DIM}]· {age_str} · {ticks} ticks[/]")
+            # 2 righe corte (~28 char ciascuna) — responsive su finestra stretta sess.1745 perf fix
+            lines.append(f"  STT {stt_dot}    Mute {mute}")
+            lines.append(f"  F24 [bold {f24_color}]D-{f24}[/]    "
+                         f"git [bold {dirty_color}]{dirty}[/]")
+            if alerts:
+                lines.append(f"  [bold {HOT_PINK}]⚠ {alerts}[/]")
+            lines.append("")
+    except Exception:
+        pass  # widget read fails silently
+
+    # ── Governance Live (sess.1745) — top 3 signals dal daemon autonomous v1.1.0 (zero I/O in render)
+    try:
+        signals = vd.get("polpo_governance") or []
+        # Dedup by signal name (mantiene il più recente)
+        seen: set[str] = set()
+        unique_signals: list[dict] = []
+        for sig in signals:
+            n = sig.get("signal", "?")
+            if n not in seen:
+                seen.add(n)
+                unique_signals.append(sig)
+        if unique_signals:
+            sev_color = {"critical": HOT_PINK, "high": DEEP_PURPL, "medium": ELEC_BLUE, "low": DIM}
+            lines.append(f"  [{DIM}]GOVERNANCE LIVE[/]  [{DIM}]· {len(unique_signals)} signals[/]")
+            for sig in unique_signals[:3]:
+                sev = sig.get("severity", "low")
+                col = sev_color.get(sev, DIM)
+                name = sig.get("signal", "?")[:20]  # ridotto da 24 a 20 — più safe su finestra stretta
+                val = sig.get("value_eur", 0)
+                val_str = f"€{val}" if val else "—"
+                urg = sig.get("urgency_days", 0)
+                urg_str = f"D-{urg}" if urg > 0 else ""
+                lines.append(f"  [{col}]●[/] [bold {FG}]{name}[/]  [{DIM}]{val_str} {urg_str}[/]")
+            lines.append("")
+    except Exception:
+        pass  # governance read fails silently
+
+    lines += [
         # ── Footer
         f"  [{DIM}]dev@digitalastra.it[/]",
         f"  [bold {HOT_PINK}]🐙[/] [{DIM}]tentacolo vocale[/]",
@@ -1853,6 +1929,7 @@ class M5Watcher(App):
     #voiceagents-funnel,
     #voiceagents-intent,
     #voiceagents-sentiment,
+    #voiceagents-live-call,
     #voiceagents-spark,
     #voiceagents-spark-sent,
     #voiceagents-killswitch {{
@@ -2013,6 +2090,8 @@ class M5Watcher(App):
         self._sentinel_data:    dict                   = {}
         # sess.1602: voice agents telemetry feed cache (refresh slow tick)
         self._voiceagents_data: dict                   = {}
+        # sess.1683: flag anti-stack boost timer per LIVE CALL accelerator (5s→2s).
+        self._live_call_boost_pending: bool            = False
         # Responsive layout — updated on terminal resize
         self._cols: int = 120
         self._rows: int = 40
@@ -2161,6 +2240,10 @@ class M5Watcher(App):
                     yield Static("", id="voiceagents-funnel", markup=True)
                     yield Static("", id="voiceagents-intent", markup=True)
                     yield Static("", id="voiceagents-sentiment", markup=True)
+                    # sess.1683 LIVE CALL widget — render condizionale 3 casi
+                    # (live / done-recent / idle). Refresh accelera 5s→2s quando
+                    # is_live=True via _refresh_slow auto-reschedule.
+                    yield Static("", id="voiceagents-live-call", markup=True)
                     yield DataTable(id="voiceagents-table", cursor_type="row", zebra_stripes=True)
                     yield Static("", id="voiceagents-spark", markup=True)
                     yield Static("", id="voiceagents-spark-sent", markup=True)
@@ -2872,6 +2955,25 @@ class M5Watcher(App):
         self._metrics.record_slow((time.perf_counter() - _t_slow) * 1000.0)
         self._metrics.record_rss()
 
+        # sess.1683: LIVE CALL accelerator — quando Marco GEO ha call IN CORSO
+        # accelera prossimo refresh slow 5s→2s per durata che scorre + transcript
+        # live. Schedulato come one-shot timer, non sostituisce set_interval(5s).
+        try:
+            lc = (self._voiceagents_data or {}).get('live_call') or {}
+            if lc.get('is_live') and not getattr(self, '_live_call_boost_pending', False):
+                self._live_call_boost_pending = True
+                def _boost_then_clear() -> None:
+                    self._live_call_boost_pending = False
+                    if not self._paused:
+                        self.run_worker(
+                            self._refresh_slow(),
+                            exclusive=False,
+                            group="slow_refresh_boost",
+                        )
+                self.set_timer(2.0, _boost_then_clear)
+        except Exception as _boost_err:
+            self._py_logger.debug("live_call boost skip: %s", _boost_err)
+
     def _render_sentinel(self, data: dict) -> None:
         canary_str, alert_str = render_sentinel(data)
         # sess.1508 round 2: diff cache via helper.
@@ -3150,6 +3252,230 @@ class M5Watcher(App):
         except Exception as e:
             self._py_logger.exception("voice agents render fail: %s", e)
 
+    def _render_voice_live_call(self, data: dict) -> None:
+        """Render `voiceagents-live-call` widget — 3 casi (sess.1683).
+
+        Sorgente: `data['live_call']` da `/tmp/polpo_marco_live.json` (fresh,
+        non cached). Render condizionale:
+          - Caso A: is_live=True               → 🔴 LIVE CALL panel
+          - Caso B: status=done && _age_s<120  → ✅ LAST CALL ENDED panel
+          - Caso C: idle / watcher_offline      → ⏸ IDLE / ⚠ WATCHER OFF
+        """
+        lc = data.get('live_call') or {}
+        if not lc:
+            self._update_if_changed(
+                "voiceagents-live-call",
+                f"[{DIM}]⏸ LIVE — no snapshot ([/]"
+                f"[{DIM}]/tmp/polpo_marco_live.json[/][{DIM}])[/]",
+            )
+            return
+
+        status = str(lc.get('status') or 'idle').lower()
+        is_live = bool(lc.get('is_live'))
+        age_s = float(lc.get('_age_s') or 0.0)
+        stale = bool(lc.get('_stale'))
+        is_zombie = bool(lc.get('_zombie'))
+        zombie_reason = str(lc.get('_zombie_reason') or '')
+
+        # sess.1758: render zombie esplicito — Francesco Guerra fantasma 47h.
+        if is_zombie:
+            lead = str(lc.get('lead_name') or '—').strip()
+            phone = str(lc.get('phone') or '').strip()
+            phone_disp = phone
+            if len(phone) >= 10:
+                phone_disp = f"{phone[:6]}***{phone[-4:]}"
+            conv_id = str(lc.get('conversation_id') or '')
+            conv_short = (conv_id[:14] + '…') if len(conv_id) > 15 else (conv_id or '—')
+            # Età reale via EL API (file disco viene riscritto ogni 2s).
+            el_age_s = float(lc.get('_el_age_s') or 0.0)
+            true_age = el_age_s if el_age_s > 0 else age_s
+            if true_age < 60:
+                age_label = f"{int(true_age)}s ago"
+            elif true_age < 3600:
+                age_label = f"{int(true_age/60)}min ago"
+            elif true_age < 86400:
+                age_label = f"{int(true_age/3600)}h ago"
+            else:
+                age_label = f"{int(true_age/86400)}d ago"
+            block = (
+                f"[bold {ORANGE}]─── 🧟 ZOMBIE CALL · watcher stuck ───────────────[/]\n"
+                f"[{WHITE}]👤 {lead}[/] [{DIM}]· 📞 {phone_disp}[/]\n"
+                f"[{DIM}]Reason:[/] [{ORANGE}]{zombie_reason}[/]\n"
+                f"[{DIM}]EL conv:[/] [{ELEC_BLUE}]{conv_short}[/] "
+                f"[{DIM}]· {age_label}[/]"
+            )
+            self._update_if_changed("voiceagents-live-call", block)
+            return
+
+        def _fmt_dur(sec: float | int) -> str:
+            s = max(0, int(sec))
+            return f"{s // 60}m{s % 60:02d}s"
+
+        # Watcher offline → file mancante
+        if status == 'watcher_offline':
+            line = (
+                f"[bold {YELLOW}]⚠ WATCHER OFFLINE[/]  "
+                f"[{DIM}]· call_watcher_llm.py non gira · "
+                f"/tmp/polpo_marco_live.json missing[/]"
+            )
+            self._update_if_changed("voiceagents-live-call", line)
+            return
+
+        lead = str(lc.get('lead_name') or '').strip() or '—'
+        company = str(lc.get('company') or '').strip()
+        provincia = str(lc.get('provincia') or '').strip()
+        phone = str(lc.get('phone') or '').strip()
+        # Mask phone tail: +393895***1545
+        phone_disp = phone
+        if len(phone) >= 10:
+            phone_disp = f"{phone[:6]}***{phone[-4:]}"
+        conv_id = str(lc.get('conversation_id') or '')
+        conv_short = (conv_id[:14] + '…') if len(conv_id) > 15 else (conv_id or '—')
+        intent = str(lc.get('intent') or 'unknown').lower()
+        intent_emoji = str(lc.get('intent_emoji') or '·')
+        sent_v = float(lc.get('sentiment') or 0.0)
+        sent_sign = "+" if sent_v >= 0 else ""
+        if sent_v >= 0.2:
+            sent_glyph, sent_color = "😊", LIME
+        elif sent_v >= 0.0:
+            sent_glyph, sent_color = "🙂", ELEC_BLUE
+        elif sent_v >= -0.2:
+            sent_glyph, sent_color = "😐", YELLOW
+        else:
+            sent_glyph, sent_color = "☹️", HOT_PINK
+
+        # Intent color
+        if intent == 'booked':
+            ic = LIME
+        elif intent == 'qualified':
+            ic = ORANGE
+        elif intent in ('rejected', 'noise'):
+            ic = HOT_PINK
+        elif intent in ('objection', 'hangup'):
+            ic = YELLOW
+        elif intent == 'callback':
+            ic = ELEC_BLUE
+        else:
+            ic = DIM
+
+        red_flags = lc.get('red_flags') or []
+        objections = lc.get('objections') or []
+        last_user = (str(lc.get('last_user') or '').strip() or '...')[:120]
+        last_agent = (str(lc.get('last_agent') or '').strip() or '...')[:120]
+        turns = int(lc.get('turns_count') or 0)
+        dur_sec = int(lc.get('duration_sec') or 0)
+
+        # ── Caso A: LIVE ──────────────────────────────────────────────────────
+        if is_live:
+            header = (
+                f"[bold {RED}]─── 🔴 LIVE CALL · {_fmt_dur(dur_sec)}"
+                f" ──────────────────────────[/]"
+            )
+            # Dedup azienda se uguale a lead (evita "Stadiumblok (Stadiumblok)")
+            if company and company.lower() != lead.lower():
+                azienda_disp = company
+            else:
+                azienda_disp = ""
+            loc_parts = [p for p in (azienda_disp, provincia) if p]
+            who_meta = f" [{DIM}]({', '.join(loc_parts)})[/]" if loc_parts else ""
+            who = (
+                f"[{WHITE}]👤[/] [bold {WHITE}]{lead}[/]{who_meta}  "
+                f"[{DIM}]·[/] [{WHITE}]📞[/] [{ELEC_BLUE}]{phone_disp}[/]"
+            )
+            kpi_parts = [
+                f"[{WHITE}]🎯 intent[/] {intent_emoji} [{ic}]{intent}[/]",
+                f"[{WHITE}]{sent_glyph} sent[/] [{sent_color}]{sent_sign}{sent_v:.2f}[/]",
+            ]
+            if red_flags:
+                kpi_parts.append(
+                    f"[bold {ORANGE}]🚨 red[/] [{HOT_PINK}]"
+                    f"{', '.join(str(r) for r in red_flags[:3])}[/]"
+                )
+            if objections:
+                kpi_parts.append(
+                    f"[{YELLOW}]⚠ obj[/] [{YELLOW}]"
+                    f"{', '.join(str(o) for o in objections[:2])}[/]"
+                )
+            kpi_line = "  [{}]·[/]  ".format(DIM).join(kpi_parts)
+
+            # Escape brackets [AGENT]/[USER] per Textual markup (\[ literal)
+            agent_line = (
+                f"[{ELEC_BLUE}]\\[AGENT][/] [{WHITE}]{last_agent}[/]"
+            )
+            user_line = (
+                f"[bold {YELLOW}]\\[USER][/]  [{WHITE}]{last_user}[/]"
+                if last_user.strip() and last_user != '...'
+                else f"[bold {YELLOW}]\\[USER][/]  [{DIM}]…in ascolto…[/]"
+            )
+            footer = (
+                f"[{DIM}]turns: {turns} · status: [/]"
+                f"[bold {ELEC_BLUE}]{status}[/] [{DIM}]· {conv_short}[/]"
+            )
+            block = "\n".join([header, who, kpi_line, agent_line, user_line, footer])
+            self._update_if_changed("voiceagents-live-call", block)
+            return
+
+        # ── Caso B: DONE recente (<120s) ──────────────────────────────────────
+        if status in ('done', 'completed', 'failed') and age_s < 120 and not stale:
+            ended_str = _fmt_dur(age_s) + " ago"
+            glyph = "✅" if status == 'done' else (
+                "⚠" if status == 'failed' else "·"
+            )
+            head_color = LIME if status == 'done' else (
+                YELLOW if status == 'failed' else DIM
+            )
+            header = (
+                f"[bold {head_color}]─── {glyph} LAST CALL ENDED · {_fmt_dur(dur_sec)}"
+                f" ───────────────[/]"
+            )
+            if company and company.lower() != lead.lower():
+                azienda_disp = company
+            else:
+                azienda_disp = ""
+            loc_parts = [p for p in (azienda_disp, provincia) if p]
+            who_meta = f" [{DIM}]({', '.join(loc_parts)})[/]" if loc_parts else ""
+            who = (
+                f"[{WHITE}]👤[/] [bold {WHITE}]{lead}[/]{who_meta}  "
+                f"[{DIM}]·[/] [{WHITE}]📞[/] [{ELEC_BLUE}]{phone_disp}[/]"
+            )
+            kpi_line = (
+                f"[{WHITE}]🎯 intent[/] {intent_emoji} [{ic}]{intent}[/]  "
+                f"[{DIM}]·[/]  "
+                f"[{WHITE}]{sent_glyph} sent[/] [{sent_color}]{sent_sign}{sent_v:.2f}[/]"
+            )
+            last_disp = last_user.strip() or last_agent.strip() or '...'
+            last_line = f"[{DIM}]Last:[/] [{WHITE}]\"{last_disp[:100]}\"[/]"
+            footer = (
+                f"[{DIM}]status: [/][bold {head_color}]{status}[/]"
+                f"  [{DIM}]· ended: {ended_str} · {conv_short}[/]"
+            )
+            block = "\n".join([header, who, kpi_line, last_line, footer])
+            self._update_if_changed("voiceagents-live-call", block)
+            return
+
+        # ── Caso C: IDLE ──────────────────────────────────────────────────────
+        if conv_id:
+            age_label = (
+                _fmt_dur(age_s) + " ago" if age_s < 3600
+                else f"{int(age_s // 60)}min ago"
+            )
+            stale_tag = f"  [{ORANGE}]· STALE[/]" if stale else ""
+            outcome_part = ""
+            if intent and intent != 'unknown':
+                outcome_part = f"  [{DIM}]·[/]  {intent_emoji} [{ic}]{intent}[/]"
+            block = (
+                f"[bold {DIM}]─── ⏸ IDLE · No active call ───────────────────[/]\n"
+                f"[{DIM}]Last:[/] [{ELEC_BLUE}]{conv_short}[/] "
+                f"[{DIM}]· {status} · {age_label} · {turns} turns[/]"
+                f"{outcome_part}{stale_tag}"
+            )
+        else:
+            block = (
+                f"[bold {DIM}]─── ⏸ IDLE · No active call ───────────────────[/]\n"
+                f"[{DIM}]Watcher live · in attesa primo dispatch[/]"
+            )
+        self._update_if_changed("voiceagents-live-call", block)
+
     def _update_voice_agents_table(self, data: dict) -> None:
         """Render TabPane Voice Agents — status + in-flight + recent + kill switch.
 
@@ -3202,9 +3528,27 @@ class M5Watcher(App):
         dlq = int(data.get('dlq_count', 0))
         health_alerts = data.get('health_alerts') or []
 
+        # sess.1758: banner ground truth — distinguisce dati EL API live
+        # vs file disco fallback. Se el_ground_truth=True i conteggi e budget
+        # vengono dall'API ElevenLabs in tempo reale (cache 60s).
+        el_gt = bool(data.get('el_ground_truth'))
+        gt_badge = (
+            f"[bold {LIME}]🛰  EL API LIVE[/]" if el_gt
+            else f"[bold {DIM}]· disk fallback[/]"
+        )
+        # Agent name human da EL (se disponibile)
+        agent_name = str(data.get('agent_name') or '').strip()
+        agent_name_part = (
+            f" [{DIM}]·[/] [bold {WHITE}]{agent_name}[/]" if agent_name else ""
+        )
+        # sess.1758: TEST MODE marker se cap < 10 (Mattia limita batch
+        # durante validazione prompt/voce — 3, 5, 7 sono valori test).
+        test_mode_part = (
+            f"  [bold {YELLOW}]🧪 TEST MODE[/]" if 0 < cap < 10 else ""
+        )
         status_lines = [
-            f"[bold {WHITE}]Agent[/] {en_badge}  "
-            f"[{DIM}]· id [/][{ELEC_BLUE}]{agent_short}[/]",
+            f"[bold {WHITE}]Agent[/] {en_badge}{agent_name_part}  "
+            f"[{DIM}]· id [/][{ELEC_BLUE}]{agent_short}[/]  {gt_badge}{test_mode_part}",
         ]
         if not enabled and (killed_by or killed_at):
             killed_line = (
@@ -3220,13 +3564,20 @@ class M5Watcher(App):
             f"[{DIM}]({cap_pct:.0f}% volume cap)[/]   "
             f"[bold {WHITE}]In-flight[/] [{ELEC_BLUE}]{in_flight_count}[/]   "
             f"[bold {WHITE}]DLQ[/] "
-            f"[{LIME if dlq == 0 else HOT_PINK}]{dlq}[/]",
+            f"[{LIME if dlq == 0 else HOT_PINK}]{dlq}[/]"
+            + (
+                f"  [{DIM}](oldest {data.get('dlq_oldest_age_h', 0):.0f}h · newest "
+                f"{data.get('dlq_newest_age_h', 0):.0f}h)[/]"
+                if dlq > 0 else ""
+            ),
             f"[bold {WHITE}]Budget[/]   "
             f"[{budget_color}]${budget_mtd:6.2f}[/] [{DIM}]/ ${budget_max:.0f}[/]   "
-            f"{gauge}  [{budget_color}]{budget_pct:>5.1f}%[/]",
+            f"{gauge}  [{budget_color}]{budget_pct:>5.1f}%[/]   "
+            f"[{DIM}]src: [/][{ELEC_BLUE if data.get('budget_source') == 'elevenlabs_api' else DIM}]"
+            f"{data.get('budget_source', '?').replace('_', ' ')}[/]",
             f"[bold {WHITE}]Opt-out[/]  "
             f"[{optout_color}]{optout_n}[/] [{DIM}]numeri permanenti[/]   "
-            f"[bold {WHITE}]Spike 24h[/] [{DIM}]{data.get('optout_24h', 0)}/{0 if not in_flight else len(in_flight)} ({data.get('optout_spike_pct', 0):.0f}%)[/]",
+            f"[bold {WHITE}]Spike 24h[/] [{DIM}]{data.get('optout_24h', 0)}/{data.get('calls_24h', 0)} ({data.get('optout_spike_pct', 0):.0f}%)[/]",
         ])
         if health_alerts:
             for ha in health_alerts[:3]:
@@ -3250,21 +3601,28 @@ class M5Watcher(App):
         )
         avg_cost_book = float(fs.get('avg_cost_per_booked', 0.0))
         cost_str = f"${avg_cost_book:.2f}" if f_book > 0 else f"[{DIM}]n/a[/]"
-        # Color funnel: booked rate >=10% LIME, >=5% YELLOW, else DIM
-        book_pct = float(fs.get('pct_booked', 0.0))
-        funnel_color = LIME if book_pct >= 10 else (YELLOW if book_pct >= 5 else DIM)
-        funnel_line = (
-            f"[bold {ORANGE}]🎯 FUNNEL[/]  "
-            f"[{WHITE}]Calls[/] [{ELEC_BLUE}]{f_calls}[/] → "
-            f"[{WHITE}]Conn[/] [{ELEC_BLUE}]{f_conn}[/] "
-            f"[{DIM}]({fs.get('pct_connected', 0):.0f}%)[/] → "
-            f"[{WHITE}]Qual[/] [{ELEC_BLUE}]{f_qual}[/] "
-            f"[{DIM}]({fs.get('pct_qualified', 0):.0f}%)[/] → "
-            f"[{WHITE}]Booked[/] [bold {funnel_color}]{f_book}[/] "
-            f"[{funnel_color}]({book_pct:.0f}%)[/]   "
-            f"[{DIM}]·[/]  [bold {WHITE}]Avg dur[/] [{ELEC_BLUE}]{avg_dur_str}[/]   "
-            f"[{DIM}]·[/]  [bold {WHITE}]Cost/booked[/] [{ELEC_BLUE}]{cost_str}[/]"
-        )
+        # sess.1758: funnel placeholder onesto quando 0 calls — meglio
+        # di "0 → 0 (0%) → 0 (0%) → 0 (0%)" che è rumore visivo puro.
+        if f_calls == 0:
+            funnel_line = (
+                f"[bold {ORANGE}]🎯 FUNNEL[/]  "
+                f"[{DIM}]Nessuna call oggi — funnel idle[/]"
+            )
+        else:
+            book_pct = float(fs.get('pct_booked', 0.0))
+            funnel_color = LIME if book_pct >= 10 else (YELLOW if book_pct >= 5 else DIM)
+            funnel_line = (
+                f"[bold {ORANGE}]🎯 FUNNEL[/]  "
+                f"[{WHITE}]Calls[/] [{ELEC_BLUE}]{f_calls}[/] → "
+                f"[{WHITE}]Conn[/] [{ELEC_BLUE}]{f_conn}[/] "
+                f"[{DIM}]({fs.get('pct_connected', 0):.0f}%)[/] → "
+                f"[{WHITE}]Qual[/] [{ELEC_BLUE}]{f_qual}[/] "
+                f"[{DIM}]({fs.get('pct_qualified', 0):.0f}%)[/] → "
+                f"[{WHITE}]Booked[/] [bold {funnel_color}]{f_book}[/] "
+                f"[{funnel_color}]({book_pct:.0f}%)[/]   "
+                f"[{DIM}]·[/]  [bold {WHITE}]Avg dur[/] [{ELEC_BLUE}]{avg_dur_str}[/]   "
+                f"[{DIM}]·[/]  [bold {WHITE}]Cost/booked[/] [{ELEC_BLUE}]{cost_str}[/]"
+            )
         self._update_if_changed("voiceagents-funnel", funnel_line)
 
         # Intent mix line
@@ -3303,28 +3661,39 @@ class M5Watcher(App):
             )
         self._update_if_changed("voiceagents-intent", intent_line)
 
-        # Sentiment row
+        # Sentiment row — sess.1758: placeholder onesto se 0 connected oggi.
         sent_avg = float(fs.get('sentiment_avg', 0.0))
         sent_trend = fs.get('sentiment_trend_7gg', '·' * 7)
-        if sent_avg >= 0.2:
-            sent_color = LIME
-            sent_glyph = "😊"
-        elif sent_avg >= 0.0:
-            sent_color = ELEC_BLUE
-            sent_glyph = "🙂"
-        elif sent_avg >= -0.2:
-            sent_color = YELLOW
-            sent_glyph = "😐"
+        f_conn_today = int(fs.get('connected', 0))
+        if f_conn_today == 0:
+            sentiment_line = (
+                f"[bold {ORANGE}]🙂 SENTIMENT[/]  "
+                f"[{DIM}]oggi nessun connect — trend 7gg[/] "
+                f"[{ELEC_BLUE}]{sent_trend}[/]"
+            )
         else:
-            sent_color = HOT_PINK
-            sent_glyph = "☹️"
-        sent_sign = "+" if sent_avg >= 0 else ""
-        sentiment_line = (
-            f"[bold {ORANGE}]{sent_glyph} SENTIMENT[/]  "
-            f"[{WHITE}]avg[/] [bold {sent_color}]{sent_sign}{sent_avg:.2f}[/]  "
-            f"[{DIM}]·[/]  [{WHITE}]trend 7gg[/] [{ELEC_BLUE}]{sent_trend}[/]"
-        )
+            if sent_avg >= 0.2:
+                sent_color = LIME
+                sent_glyph = "😊"
+            elif sent_avg >= 0.0:
+                sent_color = ELEC_BLUE
+                sent_glyph = "🙂"
+            elif sent_avg >= -0.2:
+                sent_color = YELLOW
+                sent_glyph = "😐"
+            else:
+                sent_color = HOT_PINK
+                sent_glyph = "☹️"
+            sent_sign = "+" if sent_avg >= 0 else ""
+            sentiment_line = (
+                f"[bold {ORANGE}]{sent_glyph} SENTIMENT[/]  "
+                f"[{WHITE}]avg[/] [bold {sent_color}]{sent_sign}{sent_avg:.2f}[/]  "
+                f"[{DIM}]·[/]  [{WHITE}]trend 7gg[/] [{ELEC_BLUE}]{sent_trend}[/]"
+            )
         self._update_if_changed("voiceagents-sentiment", sentiment_line)
+
+        # ── LIVE CALL widget (sess.1683) — 3 casi: live / done-recent / idle ──
+        self._render_voice_live_call(data)
 
         # ── DataTable unificata: IN-FLIGHT (top) + RECENT completed (bottom) ──
         # 9 colonne: TIME · TO · LEAD · AZIENDA · DUR · INTENT · SENT · OUTCOME · COST
@@ -3489,8 +3858,13 @@ class M5Watcher(App):
                     glyph = f"[bold {RED}]🔴 FIRED[/]"
                 elif state == 'warn':
                     glyph = f"[bold {YELLOW}]🟡 WARN[/]"
-                else:
+                elif state == 'unknown':
+                    # sess.1758: niente più "✅ SAFE" su check senza data source.
+                    glyph = f"[bold {DIM}]⚪ UNKNOWN[/]"
+                elif state == 'ok':
                     glyph = f"[bold {LIME}]✅ SAFE[/]"
+                else:
+                    glyph = f"[bold {DIM}]⚪ {state.upper()}[/]"
                 reason = ks.get('reason', '?')
                 detail = ks.get('detail', '—')
                 ks_lines.append(

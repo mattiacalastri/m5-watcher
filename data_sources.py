@@ -1369,6 +1369,237 @@ def _voice_load_json(path: Path) -> dict:
         return {}
 
 
+# sess.1758: ElevenLabs API ground truth per zombie detection live call.
+_VOICE_EL_CACHE: dict = {}
+_VOICE_EL_CACHE_TS: dict = {}
+_VOICE_EL_TTL: float = 60.0  # 60s — call zombie sono lente, no urgenza
+_VOICE_EL_KEY_FILE = Path.home() / "claude_voice" / ".env"
+
+
+def _voice_get_el_key() -> str:
+    """Legge ELEVENLABS_API_KEY via grep subprocess (pattern obbligato dal hook).
+    Cache in memoria una volta letta. Empty string se file/var mancante.
+    """
+    cached = _VOICE_EL_CACHE.get('_api_key')
+    if cached is not None:
+        return cached
+    if not _VOICE_EL_KEY_FILE.exists():
+        _VOICE_EL_CACHE['_api_key'] = ''
+        return ''
+    try:
+        import subprocess as _sp
+        out = _sp.check_output(
+            ['grep', '-E', '^ELEVENLABS_API_KEY|^XI_API_KEY', str(_VOICE_EL_KEY_FILE)],
+            stderr=_sp.DEVNULL, timeout=2.0,
+        ).decode().strip()
+        if not out:
+            _VOICE_EL_CACHE['_api_key'] = ''
+            return ''
+        key = out.split('\n')[0].split('=', 1)[1].strip().strip('"').strip("'")
+        _VOICE_EL_CACHE['_api_key'] = key
+        return key
+    except (_sp.CalledProcessError, _sp.TimeoutExpired, OSError, IndexError):
+        _VOICE_EL_CACHE['_api_key'] = ''
+        return ''
+
+
+def _voice_check_conv_via_el(conv_id: str) -> dict:
+    """Query EL API /convai/conversations/{conv_id} → ground truth start time.
+
+    Returns dict {'found', 'start_unix', 'status', 'duration_secs',
+    'call_successful', '_age_s'} o {} su errore. Cache 60s per conv_id.
+    """
+    if not conv_id:
+        return {}
+    cache_key = f'conv:{conv_id}'
+    now = _time.monotonic()
+    cached_ts = _VOICE_EL_CACHE_TS.get(cache_key, 0.0)
+    if now - cached_ts < _VOICE_EL_TTL:
+        cached = _VOICE_EL_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+    key = _voice_get_el_key()
+    if not key:
+        return {}
+    try:
+        import urllib.request as _ur
+        req = _ur.Request(
+            f'https://api.elevenlabs.io/v1/convai/conversations/{conv_id}',
+            headers={'xi-api-key': key},
+        )
+        with _ur.urlopen(req, timeout=3.0) as resp:
+            payload = _json.loads(resp.read())
+        meta = payload.get('metadata') or {}
+        start_unix = int(meta.get('start_time_unix_secs') or 0)
+        age_s = (_time.time() - start_unix) if start_unix else 0.0
+        out = {
+            'found': True,
+            'start_unix': start_unix,
+            'status': str(payload.get('status') or '').lower(),
+            'duration_secs': int(meta.get('call_duration_secs') or 0),
+            'call_successful': str((payload.get('analysis') or {}).get('call_successful') or 'unknown'),
+            '_age_s': max(0.0, age_s),
+        }
+        _VOICE_EL_CACHE[cache_key] = out
+        _VOICE_EL_CACHE_TS[cache_key] = now
+        return out
+    except Exception:
+        return {}
+
+
+def _voice_list_el_conversations(agent_id: str, limit: int = 50) -> list[dict]:
+    """Query EL API /convai/conversations?agent_id=X — ground truth conta call.
+
+    Sostituisce daily_buckets derivati da file disco (calls/*.json) che perdono
+    le call `failed`/`busy` (Twilio terminate prima che EL scriva file completo).
+    Cache 60s. Return [] su errore o no key.
+    """
+    if not agent_id:
+        return []
+    cache_key = f'list:{agent_id}:{limit}'
+    now = _time.monotonic()
+    cached_ts = _VOICE_EL_CACHE_TS.get(cache_key, 0.0)
+    if now - cached_ts < _VOICE_EL_TTL:
+        cached = _VOICE_EL_CACHE.get(cache_key)
+        if isinstance(cached, list):
+            return cached
+    key = _voice_get_el_key()
+    if not key:
+        return []
+    try:
+        import urllib.request as _ur
+        req = _ur.Request(
+            f'https://api.elevenlabs.io/v1/convai/conversations'
+            f'?agent_id={agent_id}&page_size={int(limit)}',
+            headers={'xi-api-key': key},
+        )
+        with _ur.urlopen(req, timeout=4.0) as resp:
+            payload = _json.loads(resp.read())
+        convs = payload.get('conversations') or []
+        out: list[dict] = []
+        for c in convs:
+            if not isinstance(c, dict):
+                continue
+            ts_unix = int(c.get('start_time_unix_secs') or 0)
+            out.append({
+                'conversation_id': str(c.get('conversation_id') or ''),
+                'agent_id':        str(c.get('agent_id') or ''),
+                'agent_name':      str(c.get('agent_name') or ''),
+                'status':          str(c.get('status') or '').lower(),
+                'duration_secs':   int(c.get('call_duration_secs') or 0),
+                'start_unix':      ts_unix,
+                'call_successful': str(c.get('call_successful') or 'unknown'),
+                'message_count':   int(c.get('message_count') or 0),
+                'call_summary_title': str(c.get('call_summary_title') or ''),
+            })
+        _VOICE_EL_CACHE[cache_key] = out
+        _VOICE_EL_CACHE_TS[cache_key] = now
+        return out
+    except Exception:
+        return []
+
+
+# sess.1758 — Intent classifier EL-aware (sostituisce lexicon italiano povero
+# che su trascritti reali confonde "no" / "non" con rejection forte).
+_EL_BOOKED_KW = (
+    'appuntamento', 'fissato', 'fissata', 'discovery', 'prenotato',
+    'calendarizzato', 'booking', 'booked', 'scheduled', 'meeting set',
+)
+_EL_REJECT_KW = (
+    'non interessato', 'non chiamatemi', 'rifiut', 'non mi interessa',
+    'lasciate stare', 'non chiamate', 'opt-out', 'opt out', 'cancell',
+)
+
+
+def _voice_intent_from_el(ec: dict) -> tuple[str, str]:
+    """Classifica intent da una conversation EL (list response schema).
+
+    Sorgenti: call_successful + call_summary_title + duration + status.
+    Più affidabile del lexicon-based locale che fallisce su transcript IT.
+    """
+    cs = (ec.get('call_successful') or '').lower()
+    title = (ec.get('call_summary_title') or '').lower()
+    dur = int(ec.get('duration_secs') or 0)
+    status = (ec.get('status') or '').lower()
+
+    # Booked: success + title contains booking keyword
+    if cs == 'success' and any(k in title for k in _EL_BOOKED_KW):
+        return ('booked', '✅')
+    # Rejected esplicito nel title
+    if any(k in title for k in _EL_REJECT_KW):
+        return ('rejected', '❌')
+    # Failure → rejected o noise in base alla durata
+    if cs == 'failure':
+        return ('noise', '❌') if dur < 10 else ('rejected', '❌')
+    # Initiated mai partita → noise
+    if status == 'initiated' and dur == 0:
+        return ('noise', '❌')
+    # Success: qualified se conversazione vera (>=30s), altrimenti hangup
+    if cs == 'success':
+        if dur >= 30:
+            return ('qualified', '🔥')
+        return ('hangup', '⚠')
+    # Unknown
+    if dur < 10:
+        return ('noise', '❌')
+    if dur < 60:
+        return ('hangup', '⚠')
+    return ('unknown', '·')
+
+
+def _voice_normalize_el_conv(ec: dict) -> dict:
+    """Normalizza una conversation EL nello schema usato da calls_norm.
+
+    Compatibile con render `voiceagents-table` + funnel_stats. Nota: phone
+    masked è mancante (non in list response), si lascia '—'. Lead/azienda
+    sarebbero in dynamic_vars del singolo conv (richiede fetch puntuale,
+    non incluso qui per cost).
+    """
+    ts_unix = int(ec.get('start_unix') or 0)
+    if ts_unix > 0:
+        ts_dt = _dt.fromtimestamp(ts_unix, tz=_tz.utc)
+        time_str = ts_dt.astimezone().strftime('%H:%M')
+        ts_sort = float(ts_unix)
+    else:
+        time_str = '—'
+        ts_sort = 0.0
+    dur = int(ec.get('duration_secs') or 0)
+    cs = (ec.get('call_successful') or '').lower()
+    if cs == 'success':
+        cs_label = 'OK'
+    elif cs == 'failure':
+        cs_label = 'NO'
+    else:
+        cs_label = '?'
+    intent_label, intent_emoji = _voice_intent_from_el(ec)
+    # Sentiment proxy coerente con override 7gg
+    if cs == 'success':
+        sent_v = 0.5
+    elif cs == 'failure':
+        sent_v = -0.5
+    else:
+        sent_v = 0.0
+    title = str(ec.get('call_summary_title') or '')[:80]
+    return {
+        'time':         time_str,
+        'ts_sort':      ts_sort,
+        'agent':        str(ec.get('agent_id', ''))[:8] or '—',
+        'to_masked':    '—',  # non disponibile in list response
+        'lead':         '—',
+        'azienda':      '—',
+        'duration_s':   dur,
+        'status':       (ec.get('status') or '').lower() or '—',
+        'outcome':      cs_label,
+        'cost_usd':     round(dur * (0.10 / 60.0), 4),  # stima EL pricing
+        'summary':      title,
+        'intent_label': intent_label,
+        'intent_emoji': intent_emoji,
+        'sentiment':    sent_v,
+        'term_reason':  '',
+        'conversation_id': str(ec.get('conversation_id') or ''),
+    }
+
+
 def _voice_read_live_call() -> dict:
     """Lettura LIVE call snapshot (sess.1683) — `/tmp/polpo_marco_live.json`.
 
@@ -1400,6 +1631,61 @@ def _voice_read_live_call() -> dict:
         else:
             data['_age_s'] = 0.0
             data['_stale'] = False
+
+        # sess.1758 ZOMBIE DETECTION — il watcher EL spesso resta incantato
+        # su conv `initiated` che Twilio ha terminato (busy/failed): il TUI
+        # mostra "live · 0m00s" indefinitamente. Cicatrice madre sess.1758
+        # (Francesco Guerra · conv_6701kr441 · 47h fantasma).
+        if data.get('is_live'):
+            dur = int(data.get('duration_sec') or 0)
+            turns = int(data.get('turns_count') or 0)
+            status_l = str(data.get('status') or '').lower()
+            local_age = float(data.get('_age_s') or 0.0)
+            conv_id = str(data.get('conversation_id') or '')
+
+            # PRIMARY: EL API ground truth (start_time_unix_secs).
+            # Bypassa watcher locale che riscrive ts ogni 2s mantenendo conv stale.
+            zombie = False
+            zombie_reason = ''
+            el = _voice_check_conv_via_el(conv_id) if conv_id else {}
+            if el and el.get('found'):
+                el_age = float(el.get('_age_s') or 0.0)
+                el_status = el.get('status') or ''
+                el_dur = int(el.get('duration_secs') or 0)
+                # Zombie se EL dice call vecchia >5min E ancora `initiated`
+                # (mai vera connessione), oppure status terminale.
+                if el_age > 300 and el_status == 'initiated' and el_dur == 0:
+                    zombie = True
+                    zombie_reason = (
+                        f'EL conv {el_status} da {int(el_age/60)}min · '
+                        f'duration={el_dur}s · likely Twilio busy/failed'
+                    )
+                elif el_status in ('done', 'failed') and el_age > 60:
+                    zombie = True
+                    zombie_reason = (
+                        f'EL conv {el_status} (succ={el.get("call_successful")}) '
+                        f'da {int(el_age/60)}min — watcher locale stuck'
+                    )
+            else:
+                # FALLBACK euristico locale (no API key o EL down).
+                if status_l == 'initiated' and dur == 0 and turns == 0 and local_age > 90:
+                    zombie = True
+                    zombie_reason = (
+                        f'initiated · 0s · 0 turns · snapshot age {int(local_age)}s '
+                        f'(no EL ground truth)'
+                    )
+
+            if zombie:
+                data['is_live'] = False
+                data['_zombie'] = True
+                data['_zombie_reason'] = zombie_reason
+                data['status'] = 'zombie'
+                # sess.1758: età vera EL (47h) per render — file disco è
+                # riscritto ogni 2s dal watcher, _age_s locale è fuorviante.
+                if el and el.get('_age_s'):
+                    data['_el_age_s'] = float(el.get('_age_s'))
+                    data['_el_status'] = el.get('status') or ''
+                    data['_el_call_successful'] = el.get('call_successful') or ''
         return data
     except (OSError, ValueError) as e:
         return {
@@ -1707,6 +1993,105 @@ def voice_agents_feed() -> dict:
     calls_norm.sort(key=lambda c: c['ts_sort'], reverse=True)
     recent_calls = calls_norm[:5]  # last 5 completed for "RECENT" panel
 
+    # ── sess.1758: GROUND TRUTH OVERRIDE da ElevenLabs API ────────────────────
+    # I file calls/*.json perdono le call `failed`/`busy` (Twilio le termina
+    # prima che EL completi il write). Drift osservato: disco 9 vs EL 14.
+    # Override emette: today_count, daily_buckets, sentiment proxy 7gg,
+    # budget MTD stimato da duration × pricing EL.
+    #
+    # Pricing: ElevenLabs Conversational AI = ~$0.10/min effective (LLM+TTS+STT).
+    # Stima conservativa, sostituibile con per-conv `metadata.cost` se mai
+    # esposto in /v1/convai/conversations/{id}.
+    _EL_USD_PER_SEC = 0.10 / 60.0  # ~$0.00167/sec
+    el_ground_truth = False
+    el_today_count = 0
+    el_daily_buckets: dict = {}
+    el_sent_buckets: dict = {}      # date_iso → list[float] (success +0.5 / failure -0.5)
+    el_budget_mtd = 0.0
+    el_today_total_cost = 0.0
+    el_agent_name = ''
+    if agent_id:
+        el_convs = _voice_list_el_conversations(agent_id, limit=80)
+        if el_convs:
+            el_ground_truth = True
+            # Pesca agent_name human da prima conv (tutte hanno stesso name).
+            for ec in el_convs:
+                if ec.get('agent_name'):
+                    el_agent_name = ec['agent_name']
+                    break
+            for ec in el_convs:
+                ts_unix = ec.get('start_unix') or 0
+                if ts_unix <= 0:
+                    continue
+                ts_dt = _dt.fromtimestamp(ts_unix, tz=_tz.utc)
+                d = ts_dt.date()
+                d_iso = d.isoformat()
+                # Conta call
+                if d == today_utc:
+                    el_today_count += 1
+                if d >= seven_days_ago:
+                    el_daily_buckets[d_iso] = el_daily_buckets.get(d_iso, 0) + 1
+                # Sentiment proxy via call_successful — più affidabile del
+                # lexicon locale che su trascritti italiani sbaglia spesso.
+                cs = (ec.get('call_successful') or '').lower()
+                if cs == 'success':
+                    sent_v = 0.5
+                elif cs == 'failure':
+                    sent_v = -0.5
+                else:
+                    sent_v = 0.0
+                if d >= seven_days_ago:
+                    el_sent_buckets.setdefault(d_iso, []).append(sent_v)
+                # Budget: somma duration × pricing per conv del mese corrente.
+                dur = int(ec.get('duration_secs') or 0)
+                if dur > 0 and ts_dt >= month_first_utc:
+                    el_budget_mtd += dur * _EL_USD_PER_SEC
+                if d == today_utc and dur > 0:
+                    el_today_total_cost += dur * _EL_USD_PER_SEC
+            today_count = el_today_count
+            daily_buckets = el_daily_buckets
+            # Override sent_buckets globali (sopra erano lexicon-based per i
+            # soli file disco — qui passiamo a EL ground truth).
+            sent_buckets = el_sent_buckets
+            # Override calls_norm: EL list è il record canonico (incluse
+            # failed/busy). Disco resta come anagrafica lead (lead/azienda)
+            # ma non come fonte conta. Match per conversation_id se disponibile.
+            disk_by_id = {}
+            for cn in calls_norm:
+                # calls_norm dal disco non ha conversation_id esplicito;
+                # cerco in raw originale via summary uniqueness — skip se
+                # non matchabile. Disco arricchisce solo come fallback.
+                pass
+            calls_norm_el = [_voice_normalize_el_conv(ec) for ec in el_convs]
+            calls_norm_el.sort(key=lambda c: c['ts_sort'], reverse=True)
+            calls_norm = calls_norm_el
+            recent_calls = calls_norm[:5]
+
+            # ── #8: in_flight EL-aware ────────────────────────────────────
+            # Le conv EL `initiated` con start <90s sono call live davvero;
+            # quelle >90s sono zombie (Twilio busy/failed). Se EL alive,
+            # sostituisce in_flight derivato da outbox/*.json (spesso fuori
+            # sync col runtime ElevenLabs).
+            now_unix = _time.time()
+            el_in_flight: list[dict] = []
+            for ec in el_convs:
+                ec_status = (ec.get('status') or '').lower()
+                ec_start = int(ec.get('start_unix') or 0)
+                ec_dur = int(ec.get('duration_secs') or 0)
+                age_s = now_unix - ec_start if ec_start else 999999
+                if ec_status == 'initiated' and ec_dur == 0 and age_s < 90:
+                    el_in_flight.append({
+                        'call_id':       (ec.get('conversation_id') or '')[:24],
+                        'phone_masked':  '—',
+                        'lead':          '(EL initiated)',
+                        'status':        'in-flight',
+                        'age':           _voice_relative_age(age_s),
+                        'age_s':         float(age_s),
+                        'reason':        '',
+                        'retry':         0,
+                    })
+            in_flight = el_in_flight  # sostituisce outbox-based
+
     # 7-day sparkline COUNT (oldest→newest)
     sparkline_counts = []
     for i in range(6, -1, -1):
@@ -1796,21 +2181,38 @@ def voice_agents_feed() -> dict:
         'today_total_cost':   round(today_total_cost, 2),
     }
 
-    # ── 5. DLQ count ──────────────────────────────────────────────────────────
+    # ── 5. DLQ count + età (sess.1758: drift visibility) ─────────────────────
     dlq_count = 0
+    dlq_oldest_age_h = 0.0
+    dlq_newest_age_h = 0.0
     if _VOICE_DLQ_DIR.exists() and _VOICE_DLQ_DIR.is_dir():
         try:
-            dlq_count = sum(1 for _ in _VOICE_DLQ_DIR.glob('*.json'))
+            dlq_files = list(_VOICE_DLQ_DIR.glob('*.json'))
+            dlq_count = len(dlq_files)
+            if dlq_files:
+                mtimes = [f.stat().st_mtime for f in dlq_files]
+                oldest = min(mtimes)
+                newest = max(mtimes)
+                now_unix2 = _time.time()
+                dlq_oldest_age_h = max(0.0, (now_unix2 - oldest) / 3600.0)
+                dlq_newest_age_h = max(0.0, (now_unix2 - newest) / 3600.0)
         except OSError:
             pass
 
-    # ── 6. Cost cache (cost_watchdog → autoritativo se presente) ──────────────
+    # ── 6. Budget MTD — priority: EL API > cost_cache > file disco ────────────
+    # sess.1758: cost_watchdog.py spesso muore (cache_fresh=false), e il
+    # fallback file disco perde le call non scritte. EL API è la fonte vera.
     cost_cache = _voice_load_json(_VOICE_COST_CACHE)
-    if cost_cache:
+    if el_ground_truth:
+        budget_mtd = round(el_budget_mtd, 2)
+        budget_source = 'elevenlabs_api'
+    elif cost_cache:
         budget_mtd = float(cost_cache.get('spend_usd', budget_mtd_from_calls) or budget_mtd_from_calls)
         budget_max_usd = float(cost_cache.get('budget_usd', budget_max_usd) or budget_max_usd)
+        budget_source = 'cost_watchdog_cache'
     else:
         budget_mtd = budget_mtd_from_calls
+        budget_source = 'disk_calls_fallback'
 
     # ── 7. Opt-out registry + spike 24h ───────────────────────────────────────
     optout_count = 0
@@ -1825,9 +2227,15 @@ def voice_agents_feed() -> dict:
 
     optout_24h = 0
     calls_24h = 0
+    cutoff = now_utc - _td(hours=24)
+    cutoff_ts = cutoff.timestamp()
+    # Conta call 24h è SEMPRE calcolato (slegato da optout file presence —
+    # sess.1758 fix: prima era 0 se optout file mancante, denominator wrong).
+    for c in calls_norm:
+        if c.get('ts_sort') and c['ts_sort'] >= cutoff_ts:
+            calls_24h += 1
     if _VOICE_OPTOUT_FILE.exists():
         try:
-            cutoff = now_utc - _td(hours=24)
             for line in _VOICE_OPTOUT_FILE.read_text().splitlines():
                 line = line.strip()
                 if not line:
@@ -1839,21 +2247,28 @@ def voice_agents_feed() -> dict:
                         optout_24h += 1
                 except ValueError:
                     continue
-            for c in calls_norm:
-                if c['ts_sort'] and c['ts_sort'] >= cutoff.timestamp():
-                    calls_24h += 1
         except OSError:
             pass
     optout_spike_pct = (optout_24h / calls_24h * 100.0) if calls_24h else 0.0
     budget_pct = (budget_mtd / budget_max_usd * 100.0) if budget_max_usd > 0 else 0.0
 
     # ── 8. Health alerts (health_check.py cache) ──────────────────────────────
+    # sess.1758: filtra alerts cost_watchdog se EL ground truth è attivo —
+    # il budget viene da EL API live, la cache è irrilevante. Inoltre
+    # `Cost cache stale: Nonem old` è bug formato in health_check.py
+    # (age=None concatenato a 'm old'); finché non si fixa upstream, mute.
     health = _voice_load_json(_VOICE_HEALTH_CACHE)
     health_alerts: list[str] = []
     if health:
         for a in (health.get('alerts') or []):
-            if isinstance(a, str):
-                health_alerts.append(a.strip())
+            if not isinstance(a, str):
+                continue
+            a_l = a.lower()
+            if el_ground_truth and ('cost cache' in a_l or 'cost_watchdog' in a_l):
+                continue
+            if 'nonem old' in a_l:  # bug formato upstream — sempre filtrato
+                continue
+            health_alerts.append(a.strip())
 
     # ── 9. Kill switch status (5 trigger canonici sess.1683) ──────────────────
     # Se policy.yaml ha triggers usa quelli, altrimenti default 5-condition stub.
@@ -1866,41 +2281,54 @@ def voice_agents_feed() -> dict:
             {'reason': 'PEC complaint formale'},
             {'reason': 'budget cap raggiunto'},
         ]
+    # sess.1758: hard-coded "0/3 / 0 menzioni / 0 PEC" rimossi —
+    # senza data source reale lo stato è 'unknown', non 'ok'.
+    # Solo opt-out e budget hanno ground truth (file disco / cost cache).
     kill_status: list[dict] = []
     for trig in triggers:
         if not isinstance(trig, dict):
             continue
         reason = str(trig.get('reason', '?'))
-        state = 'ok'
-        detail = '—'
+        state = 'unknown'
+        detail = 'no data source'
         rl = reason.lower()
         if 'garante' in rl or 'segnalazion' in rl:
-            detail = '0/3 in 7gg'
-            state = 'ok'
+            # TODO sess.1758: connettere a registro reclami / RPA Garante.
+            detail = 'no data source (manual check)'
+            state = 'unknown'
         elif 'trustpilot' in rl or 'virale' in rl:
-            detail = '0 menzioni note'
-            state = 'ok'
+            # TODO sess.1758: scraping Trustpilot / Reddit / X mentions.
+            detail = 'no data source (manual check)'
+            state = 'unknown'
         elif 'opt-out' in rl or 'optout' in rl or 'opt out' in rl:
             detail = f"{optout_24h}/{calls_24h or 0} in 24h ({optout_spike_pct:.0f}%)"
             if optout_spike_pct >= 10.0:
                 state = 'fired'
             elif optout_spike_pct >= 7.0:
                 state = 'warn'
+            else:
+                state = 'ok'
         elif 'pec' in rl or 'complaint' in rl:
-            detail = '0 PEC ricevute'
-            state = 'ok'
+            # TODO sess.1758: IMAP probe PEC mailbox.
+            detail = 'no data source (manual check)'
+            state = 'unknown'
         elif 'budget' in rl:
             detail = f"${budget_mtd:.2f}/${budget_max_usd:.0f} ({budget_pct:.0f}%)"
             if budget_pct >= budget_hard_pct:
                 state = 'fired'
             elif budget_pct >= budget_alert_pct:
                 state = 'warn'
+            else:
+                state = 'ok'
         kill_status.append({'reason': reason, 'state': state, 'detail': detail})
 
     out = {
         'enabled':           enabled,
         'agent_id':          agent_id,
         'agent_id_short':    agent_id_short,
+        'el_ground_truth':   el_ground_truth,
+        'agent_name':        el_agent_name,
+        'budget_source':     budget_source,
         'phone_masked':      phone_masked,
         'killed_by':         killed_by,
         'killed_at':         killed_at,
@@ -1913,11 +2341,14 @@ def voice_agents_feed() -> dict:
         'budget_hard_pct':   budget_hard_pct,
         'optout_count':      optout_count,
         'optout_24h':        optout_24h,
+        'calls_24h':         calls_24h,
         'optout_spike_pct':  round(optout_spike_pct, 1),
         'in_flight':         in_flight,
         'in_flight_count':   len(in_flight),
         'recent_calls':      recent_calls,
         'dlq_count':         dlq_count,
+        'dlq_oldest_age_h':  round(dlq_oldest_age_h, 1),
+        'dlq_newest_age_h':  round(dlq_newest_age_h, 1),
         'health_alerts':     health_alerts,
         'calls':             calls_norm[:16],
         'sparkline_7d':      sparkline_str,

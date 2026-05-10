@@ -2281,9 +2281,30 @@ def voice_agents_feed() -> dict:
             {'reason': 'PEC complaint formale'},
             {'reason': 'budget cap raggiunto'},
         ]
-    # sess.1758: hard-coded "0/3 / 0 menzioni / 0 PEC" rimossi —
-    # senza data source reale lo stato è 'unknown', non 'ok'.
-    # Solo opt-out e budget hanno ground truth (file disco / cost cache).
+    # sess.1758: hard-coded "0/3 / 0 menzioni / 0 PEC" rimossi.
+    # 3 detector senza API ground truth automatica accettano manual
+    # override via ~/.config/astra/kpi_targets.yaml -> kill_switches.
+    # null/missing -> UNKNOWN. int 0 -> SAFE manual-confirmed. >= soglia -> FIRED.
+    kpi_yaml = _voice_load_yaml(Path.home() / '.config' / 'astra' / 'kpi_targets.yaml')
+    ks_manual = _safe_dict(kpi_yaml, 'kill_switches')
+    ks_garante = ks_manual.get('garante_segnalazioni_7gg')
+    ks_trust   = ks_manual.get('trustpilot_neg_24h')
+    ks_pec     = ks_manual.get('pec_complaint_count')
+
+    def _ks_compute(val, fired_threshold: int, ok_label_zero: str, unknown_label: str) -> tuple[str, str]:
+        """Compute manual override state: None -> unknown, int -> compute state."""
+        if val is None:
+            return 'unknown', unknown_label
+        try:
+            n = int(val)
+        except (TypeError, ValueError):
+            return 'unknown', f'{unknown_label} (invalid YAML value)'
+        if n >= fired_threshold:
+            return 'fired', f'{n} (>= {fired_threshold} threshold)'
+        if n == 0:
+            return 'ok', f'{ok_label_zero} (manual confirmed)'
+        return 'warn', f'{n} (under threshold {fired_threshold})'
+
     kill_status: list[dict] = []
     for trig in triggers:
         if not isinstance(trig, dict):
@@ -2293,13 +2314,11 @@ def voice_agents_feed() -> dict:
         detail = 'no data source'
         rl = reason.lower()
         if 'garante' in rl or 'segnalazion' in rl:
-            # TODO sess.1758: connettere a registro reclami / RPA Garante.
-            detail = 'no data source (manual check)'
-            state = 'unknown'
+            state, detail = _ks_compute(ks_garante, 3, '0/3 in 7gg',
+                                        'no data source (set kill_switches.garante_segnalazioni_7gg in kpi_targets.yaml)')
         elif 'trustpilot' in rl or 'virale' in rl:
-            # TODO sess.1758: scraping Trustpilot / Reddit / X mentions.
-            detail = 'no data source (manual check)'
-            state = 'unknown'
+            state, detail = _ks_compute(ks_trust, 1, '0 menzioni',
+                                        'no data source (set kill_switches.trustpilot_neg_24h in kpi_targets.yaml)')
         elif 'opt-out' in rl or 'optout' in rl or 'opt out' in rl:
             detail = f"{optout_24h}/{calls_24h or 0} in 24h ({optout_spike_pct:.0f}%)"
             if optout_spike_pct >= 10.0:
@@ -2309,9 +2328,8 @@ def voice_agents_feed() -> dict:
             else:
                 state = 'ok'
         elif 'pec' in rl or 'complaint' in rl:
-            # TODO sess.1758: IMAP probe PEC mailbox.
-            detail = 'no data source (manual check)'
-            state = 'unknown'
+            state, detail = _ks_compute(ks_pec, 1, '0 PEC ricevute',
+                                        'no data source (set kill_switches.pec_complaint_count in kpi_targets.yaml)')
         elif 'budget' in rl:
             detail = f"${budget_mtd:.2f}/${budget_max_usd:.0f} ({budget_pct:.0f}%)"
             if budget_pct >= budget_hard_pct:

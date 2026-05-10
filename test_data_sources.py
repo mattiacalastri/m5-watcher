@@ -478,6 +478,216 @@ class TestVoiceAgentsFeedSmoke(unittest.TestCase):
         ds._VOICE_FEED_CACHE = {}
         ds._VOICE_FEED_TS = 0.0
 
+    def test_with_populated_outbox_and_calls(self):
+        """Walk the full voice_agents_feed body with realistic fixtures."""
+        with tempfile.TemporaryDirectory(prefix="m5w_va2_") as tmp:
+            base = Path(tmp)
+            outbox = base / "outbox"; outbox.mkdir()
+            calls = base / "calls"; calls.mkdir()
+            dlq = base / "dlq"; dlq.mkdir()
+
+            # Outbox: in-flight call
+            (outbox / "of1.json").write_text(json.dumps({
+                "call_id": "abc123",
+                "phone": "+393331234567",
+                "status": "dispatched",
+                "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "dynamic_vars": {"NOME_LEAD": "Mario", "NOME_AZIENDA": "Astra"},
+                "retry_count": 0,
+            }))
+            # Outbox: malformed → forces ValueError handling branch
+            (outbox / "bad.json").write_text("{not valid")
+
+            # Completed calls
+            now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+            (calls / "c1.json").write_text(json.dumps({
+                "dispatch_ts_utc": now_iso,
+                "status": "booked",
+                "call_successful": True,
+                "lead_name": "Mario Rossi",
+                "company": "Astra",
+                "to_number": "+393331234567",
+                "duration_seconds": 120,
+                "summary": "appuntamento fissato per lunedì",
+                "termination_reason": "end_call",
+                "cost_estimate": {"total_usd": 0.42},
+                "transcript": [
+                    {"role": "user",  "message": "perfetto, ottimo, mi interessa"},
+                    {"role": "agent", "message": "ok confermo"},
+                ],
+            }))
+            (calls / "c2.json").write_text(json.dumps({
+                "dispatch_ts_utc": now_iso,
+                "status": "failed",
+                "call_successful": False,
+                "duration_seconds": 5,
+                "to_number": "user_xxx",  # ID-like phone is filtered
+                "summary": "non mi interessa, non chiami più",
+                "transcript": [],
+            }))
+            # Optout
+            optout = base / "optout.jsonl"
+            optout.write_text(json.dumps({"phone": "+395550000000"}) + "\n")
+            # Setters yaml + policy yaml minimal
+            setters = base / "setters.yaml"
+            setters.write_text(
+                "ai_setter:\n  agent_id: agt_abc\n  phone_number_id: +393331234567\n"
+                "  enabled: true\n  batch_daily_limit: 50\n"
+            )
+            policy = base / "policy.yaml"
+            policy.write_text(
+                "volume:\n  max_calls_per_day: 80\n"
+                "budget:\n  max_monthly_usd: 500\n  alert_at_pct: 75\n  hard_stop_at_pct: 100\n"
+                "kill_switch: {}\n"
+            )
+
+            with patch.multiple(
+                ds,
+                _VOICE_TELEMETRY_DIR=base,
+                _VOICE_CALLS_DIR=calls,
+                _VOICE_OUTBOX_DIR=outbox,
+                _VOICE_DLQ_DIR=dlq,
+                _VOICE_OPTOUT_FILE=optout,
+                _VOICE_POLICY_FILE=policy,
+                _VOICE_SETTERS_FILE=setters,
+                _VOICE_LIVE_CALL=base / "live.json",
+                _VOICE_FEED_CACHE={},
+                _VOICE_FEED_TS=0.0,
+            ):
+                out = ds.voice_agents_feed()
+        self.assertIsInstance(out, dict)
+        # Reset cache after run
+        ds._VOICE_FEED_CACHE = {}
+        ds._VOICE_FEED_TS = 0.0
+
+
+class TestVoiceLoadYaml(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="m5w_yaml_")
+        self.path = Path(self._tmp.name) / "x.yaml"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_missing_returns_empty(self):
+        self.assertEqual(ds._voice_load_yaml(self.path), {})
+
+    def test_valid_yaml(self):
+        self.path.write_text("a: 1\nb:\n  c: 2\n")
+        out = ds._voice_load_yaml(self.path)
+        self.assertEqual(out["a"], 1)
+        self.assertEqual(out["b"]["c"], 2)
+
+    def test_non_dict_yaml_returns_empty(self):
+        self.path.write_text("- 1\n- 2\n")  # list at root
+        self.assertEqual(ds._voice_load_yaml(self.path), {})
+
+
+class TestSafeDictAndList(unittest.TestCase):
+
+    def test_safe_dict_returns_inner(self):
+        self.assertEqual(ds._safe_dict({"a": {"x": 1}}, "a"), {"x": 1})
+
+    def test_safe_dict_missing_key_returns_empty(self):
+        self.assertEqual(ds._safe_dict({}, "a"), {})
+
+    def test_safe_dict_non_dict_returns_empty(self):
+        self.assertEqual(ds._safe_dict("not a dict", "a"), {})
+
+    def test_safe_dict_value_not_dict_returns_empty(self):
+        self.assertEqual(ds._safe_dict({"a": [1, 2]}, "a"), {})
+
+    def test_safe_list_returns_inner(self):
+        self.assertEqual(ds._safe_list({"a": [1, 2]}, "a"), [1, 2])
+
+    def test_safe_list_missing_returns_empty(self):
+        self.assertEqual(ds._safe_list({}, "a"), [])
+
+    def test_safe_list_value_not_list_returns_empty(self):
+        self.assertEqual(ds._safe_list({"a": {"x": 1}}, "a"), [])
+
+
+class TestDetectIntent(unittest.TestCase):
+
+    def test_booked(self):
+        call = {
+            "summary": "appuntamento fissato per lunedì alle 15",
+            "termination_reason": "end_call",
+            "duration_seconds": 120,
+            "status": "completed",
+        }
+        label, _ = ds._detect_intent(call)
+        self.assertEqual(label, "booked")
+
+    def test_rejected(self):
+        call = {"summary": "non mi interessa", "duration_seconds": 60}
+        label, _ = ds._detect_intent(call)
+        self.assertEqual(label, "rejected")
+
+    def test_short_call_is_noise(self):
+        call = {"summary": "", "duration_seconds": 5}
+        label, _ = ds._detect_intent(call)
+        self.assertEqual(label, "noise")
+
+    def test_short_failed_is_noise(self):
+        call = {"summary": "", "status": "failed", "duration_seconds": 3}
+        label, _ = ds._detect_intent(call)
+        self.assertEqual(label, "noise")
+
+    def test_medium_no_signal_is_hangup(self):
+        call = {"summary": "boh non so", "duration_seconds": 30}
+        label, _ = ds._detect_intent(call)
+        self.assertEqual(label, "hangup")
+
+    def test_long_no_signal_is_unknown(self):
+        call = {"summary": "lungo discorso normale", "duration_seconds": 90}
+        label, _ = ds._detect_intent(call)
+        self.assertEqual(label, "unknown")
+
+
+class TestSentiment(unittest.TestCase):
+
+    def test_empty_transcript_zero(self):
+        self.assertEqual(ds._sentiment({}), 0.0)
+        self.assertEqual(ds._sentiment({"transcript": []}), 0.0)
+
+    def test_transcript_not_a_list_zero(self):
+        self.assertEqual(ds._sentiment({"transcript": "string"}), 0.0)
+
+    def test_no_user_messages_zero(self):
+        call = {"transcript": [{"role": "agent", "message": "ciao"}]}
+        self.assertEqual(ds._sentiment(call), 0.0)
+
+    def test_positive_sentiment(self):
+        call = {"transcript": [
+            {"role": "user", "message": "perfetto, ottimo, fantastico"}
+        ]}
+        self.assertGreater(ds._sentiment(call), 0)
+
+    def test_negative_sentiment(self):
+        call = {"transcript": [
+            {"role": "user", "message": "non mi interessa, spam, non chiami"}
+        ]}
+        self.assertLess(ds._sentiment(call), 0)
+
+
+class TestSentimentGlyph(unittest.TestCase):
+
+    def test_none_dot(self):
+        self.assertEqual(ds._sentiment_glyph(None), "·")
+
+    def test_near_zero_dot(self):
+        self.assertEqual(ds._sentiment_glyph(0.01), "·")
+
+    def test_positive_signed(self):
+        out = ds._sentiment_glyph(0.5)
+        self.assertEqual(out, "+0.5")
+
+    def test_negative_signed(self):
+        out = ds._sentiment_glyph(-0.7)
+        self.assertEqual(out, "-0.7")
+
 
 # =============================================================================
 # set_log_sources

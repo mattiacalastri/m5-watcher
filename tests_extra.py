@@ -621,6 +621,86 @@ class TestCmdSnapshotErrorPaths(unittest.TestCase):
             self.skipTest(f"unexpected: path turned out to be writable on this host (rc={rc})")
         self.assertIn("snapshot", buf.getvalue())
 
+    def test_snapshot_swallows_each_data_source_failure(self):
+        """When every data source raises, the snapshot still serializes."""
+        import io
+        from unittest.mock import patch
+
+        def _explode(*a, **kw):
+            raise RuntimeError("synthetic boom")
+
+        async def _explode_async(*a, **kw):
+            raise RuntimeError("synthetic async boom")
+
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        with patch.object(cc.ds, "cpu_per_core", side_effect=_explode_async), \
+             patch.object(cc.ds, "unified_memory", side_effect=_explode), \
+             patch.object(cc.ds, "battery", side_effect=_explode), \
+             patch.object(cc.ds, "top_processes", side_effect=_explode), \
+             patch.object(cc.ds, "tentacoli", side_effect=_explode), \
+             patch.object(cc.ds, "current_focus", side_effect=_explode), \
+             patch.object(cc.ds, "log_feed", side_effect=_explode), \
+             patch.object(cc.kpi_widget, "read_kpi_data", side_effect=_explode), \
+             patch("sys.stderr", buf_err), \
+             patch("sys.stdout", buf_out):
+            rc = cc.cmd_snapshot(self._make_args())
+        self.assertEqual(rc, 0)
+        # JSON still parseable
+        snap = json.loads(buf_out.getvalue())
+        # Every section that supports an "error" key reflects the failure
+        for key in ("memory", "battery", "focus", "kpi"):
+            self.assertIn("error", snap[key])
+        # Sources that fall back to empty list/lists
+        self.assertEqual(snap["cpu_per_core"], [])
+        self.assertEqual(snap["processes"], [])
+        self.assertEqual(snap["tentacoli"], [])
+        self.assertEqual(snap["logs"], [])
+
+    def test_snapshot_json_dumps_failure_returns_1(self):
+        """If json.dumps fails (non-serialisable object), returns 1 with stderr message."""
+        import io
+        from unittest.mock import patch
+        buf = io.StringIO()
+        with patch("cli_commands.json.dumps", side_effect=TypeError("unserialisable")), \
+             patch("sys.stderr", buf), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            rc = cc.cmd_snapshot(self._make_args())
+        self.assertEqual(rc, 1)
+        self.assertIn("json.dumps failed", buf.getvalue())
+
+
+class TestCmdHealthErrorPaths(unittest.TestCase):
+
+    def test_health_kpi_read_error_records_error_status(self):
+        import io
+        from unittest.mock import patch
+        buf = io.StringIO()
+        with patch.object(cc, "kpi_widget") as fake_kpi, \
+             patch("sys.stdout", buf):
+            fake_kpi.read_kpi_data.side_effect = RuntimeError("boom")
+            rc = cc.cmd_health(argparse.Namespace())
+        data = json.loads(buf.getvalue())
+        self.assertEqual(rc, 2)
+        self.assertEqual(data["verdict"], "ERROR")
+        kpi_check = next(c for c in data["checks"] if c["name"] == "kpi_loaded")
+        self.assertEqual(kpi_check["status"], "ERROR")
+
+
+class TestCmdWalkErrorPaths(unittest.TestCase):
+
+    def test_walk_vault_graph_data_raises_returns_1(self):
+        import io
+        from unittest.mock import patch
+        buf = io.StringIO()
+        with patch.object(cc.vault_parser, "vault_graph_data", side_effect=RuntimeError("crash")), \
+             patch("sys.stderr", buf):
+            ns = argparse.Namespace()
+            ns.vault = None
+            rc = cc.cmd_walk(ns)
+        self.assertEqual(rc, 1)
+        self.assertIn("vault_graph_data failed", buf.getvalue())
+
 
 # =============================================================================
 # vault_parser — hermetic vault tests (no dependency on user's Obsidian vault)

@@ -428,5 +428,61 @@ class TestSafeRenderWrappers(unittest.TestCase):
             self.assertIn("RuntimeError", out)
 
 
+# =============================================================================
+# Headless Textual pilot — exercises the M5Watcher app
+# =============================================================================
+
+class TestHeadlessTextualWarRoom(unittest.IsolatedAsyncioTestCase):
+    """Smoke pilots that walk the war_room compose tree + tab/key bindings.
+
+    Mirrors test_suite.TestHeadlessTextual but for app_war_room. Each test boots
+    M5Watcher headless, exercises a binding, and asserts no exception escapes.
+    """
+
+    async def test_compose_no_error(self):
+        async with wr.M5Watcher().run_test(headless=True) as pilot:
+            self.assertIsNotNone(pilot.app)
+
+    async def test_tab_switch_walks_all_panes(self):
+        from textual.widgets import TabbedContent
+        async with wr.M5Watcher().run_test(headless=True) as pilot:
+            for key in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
+                await pilot.press(key)
+                await pilot.pause(0.05)
+            tc = pilot.app.query_one(TabbedContent)
+            # Last tab pressed was '9' → pulse pane
+            self.assertEqual(tc.active, "tab-pulse")
+
+    async def test_pause_toggle(self):
+        async with wr.M5Watcher().run_test(headless=True) as pilot:
+            self.assertFalse(pilot.app._paused)
+            await pilot.press("p")
+            await pilot.pause(0.05)
+            self.assertTrue(pilot.app._paused)
+            await pilot.press("p")
+            await pilot.pause(0.05)
+            self.assertFalse(pilot.app._paused)
+
+    async def test_graph_filter_cycle(self):
+        import graph_widget
+        async with wr.M5Watcher().run_test(headless=True) as pilot:
+            await pilot.press("5")
+            await pilot.pause(0.05)
+            initial = pilot.app._graph_filter
+            await pilot.press("f")
+            await pilot.pause(0.05)
+            after = pilot.app._graph_filter
+            modes = list(graph_widget.FILTER_MODES)
+            self.assertEqual(after, modes[(modes.index(initial) + 1) % len(modes)])
+
+    async def test_debug_tab_renders(self):
+        async with wr.M5Watcher().run_test(headless=True) as pilot:
+            await pilot.press("d")
+            await pilot.pause(0.05)
+            from textual.widgets import TabbedContent
+            tc = pilot.app.query_one(TabbedContent)
+            self.assertEqual(tc.active, "tab-debug")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

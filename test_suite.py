@@ -369,10 +369,46 @@ class TestVaultParser(unittest.TestCase):
 
 class TestGraphWidget(unittest.TestCase):
     _gdata: dict = {}
+    _tmpdir: tempfile.TemporaryDirectory | None = None
 
     @classmethod
     def setUpClass(cls):
-        cls._gdata = _vp.vault_graph_data()
+        # Build a hermetic vault so render_graph exercises every section
+        # regardless of whether the user's real Obsidian vault is mounted.
+        cls._tmpdir = tempfile.TemporaryDirectory(prefix="m5w_graphtest_")
+        vault = Path(cls._tmpdir.name)
+        (vault / "Areas").mkdir()
+        (vault / "Notes").mkdir()
+        (vault / "Areas" / "MOC Index.md").write_text(
+            "---\nstatus: evergreen\n---\n[[Note A]] [[Note B]] [[Note C]]\n"
+        )
+        (vault / "Areas" / "🗺 Atlas.md").write_text(
+            "---\nstatus: growing\n---\n[[Note A]] [[Note D]]\n"
+        )
+        (vault / "Notes" / "Note A.md").write_text(
+            "---\nstatus: evergreen\n---\n[[Note B]] [[Note C]]\n"
+        )
+        (vault / "Notes" / "Note B.md").write_text(
+            "---\nstatus: seed\n---\n[[Note A]]\n"
+        )
+        (vault / "Notes" / "Note C.md").write_text(
+            "---\nstatus: stub\n---\n[[Note A]] [[Note B]]\n"
+        )
+        (vault / "Notes" / "Note D.md").write_text("orphan-ish content\n")
+        for i in range(8):
+            (vault / "Notes" / f"Filler {i}.md").write_text(f"[[Note A]] [[Note B]] body {i}\n")
+
+        _vp._cache = None
+        _vp._cache_ts = 0.0
+        cls._gdata = _vp.vault_graph_data(vault=vault)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._tmpdir is not None:
+            cls._tmpdir.cleanup()
+            cls._tmpdir = None
+        _vp._cache = None
+        _vp._cache_ts = 0.0
 
     def test_render_graph_all_mode(self):
         result = _gw.render_graph(self._gdata, filter_mode="all")

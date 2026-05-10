@@ -303,8 +303,8 @@ def render_cpu(percents: list[float], history: deque[float],
 
     e_vals = percents[:ds.E_CORES]
     p_vals = percents[ds.E_CORES: ds.E_CORES + ds.P_CORES]
-    e_avg  = mean(e_vals)
-    p_avg  = mean(p_vals)
+    e_avg  = mean(e_vals) if e_vals else 0.0
+    p_avg  = mean(p_vals) if p_vals else 0.0
     la1, la5, la15 = ds.load_avg()
     overall = mean(percents)
     hs, hc  = health_score(overall, 0, la1)   # mem not available here, pass 0

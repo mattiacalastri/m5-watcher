@@ -241,6 +241,101 @@ def cmd_health(args: argparse.Namespace) -> int:
     return exit_code
 
 
+# ── Garden Walk ───────────────────────────────────────────────────────────────
+
+def cmd_walk(args: argparse.Namespace) -> int:
+    """Garden walk — vault topology tour: hubs, bridges, clusters, orphans."""
+    vault: Path | None = None
+    raw = getattr(args, "vault", None)
+    if raw:
+        vault = Path(raw).expanduser()
+
+    try:
+        data = vault_parser.vault_graph_data(vault=vault)
+    except Exception as exc:
+        print(f"[walk] vault_graph_data failed: {exc}", file=sys.stderr)
+        return 1
+
+    if "error" in data:
+        print(f"[walk] {data['error']}", file=sys.stderr)
+        return 1
+
+    s = data.get("stats", {})
+    i = data.get("intel", {})
+
+    if not s.get("total"):
+        print("[walk] vault empty — nothing to walk.", file=sys.stderr)
+        return 1
+
+    out: list[str] = []
+    out.append(
+        f"\n🕸  VAULT — {s['total']} note · {s.get('edges', 0)} link"
+        f" · {s.get('mocs', 0)} MOC · {s.get('orphans', 0)} orfani"
+    )
+    out.append(
+        f"   density={i.get('density', 0):.4f}"
+        f"  clustering={i.get('clustering', 0):.3f}"
+        f"  giant={i.get('giant_ratio', 0) * 100:.0f}%"
+        f"  avg_deg={i.get('avg_degree', 0):.2f}"
+    )
+
+    top_in = i.get("top_indegree") or []
+    if top_in:
+        out.append("\n🔗  TOP HUB (in-degree)")
+        for n, ind, outd, t, bet in top_in[:8]:
+            out.append(f"   [{t[:6]:>6}] {n[:42]:<42}  ←{ind:>3}  →{outd:>3}  bet={bet:.3f}")
+
+    bridges = i.get("top_bridges") or []
+    if bridges:
+        out.append("\n🌉  TOP BRIDGE (betweenness)")
+        for n, b in bridges[:5]:
+            out.append(f"   {n[:48]:<48}  {b:.4f}")
+
+    clusters = i.get("top_clusters") or []
+    if clusters:
+        out.append(f"\n🧩  CLUSTERS (n={i.get('n_clusters', 0)}) — top 5 by size")
+        for hub, sz in clusters:
+            out.append(f"   {sz:>4} note  · hub: {hub}")
+
+    status = i.get("status_dist") or {}
+    if status:
+        out.append("\n📊  STATUS DISTRIBUTION")
+        for k, v in status.items():
+            out.append(f"   {k:<10} {v}")
+
+    folders = i.get("folder_dist") or {}
+    if folders:
+        out.append("\n🗂  FOLDER DISTRIBUTION")
+        for k, v in sorted(folders.items(), key=lambda x: -x[1])[:10]:
+            out.append(f"   {k:<24} {v}")
+
+    communities = i.get("semantic_communities") or []
+    if communities:
+        out.append(f"\n🌍  SEMANTIC COMMUNITIES ({len(communities)})")
+        for c in communities:
+            hubs = " · ".join(c.get("top_hubs", []))
+            out.append(f"   [{c.get('size', 0):>4}] {c.get('label', ''):<28}  hubs: {hubs}")
+
+    G = data.get("graph")
+    if G is not None:
+        orphans = [n for n in G.nodes if G.nodes[n].get("type") == "orphan"]
+        if orphans:
+            out.append(f"\n🪦  ORFANI ({len(orphans)}) — note che nessuno linka")
+            for n in orphans[:10]:
+                out.append(f"   · {n}")
+            if len(orphans) > 10:
+                out.append(f"   … +{len(orphans) - 10} altri")
+
+    recent = i.get("recent_today") or []
+    if recent:
+        out.append(f"\n🆕  RECENT TODAY ({len(recent)}) · 7gg: {i.get('recent_7d', 0)}")
+        for n, hm in recent:
+            out.append(f"   {hm}  {n}")
+
+    print("\n".join(out))
+    return 0
+
+
 # ── Webhook ───────────────────────────────────────────────────────────────────
 
 def _post(url: str, payload: dict) -> None:
@@ -296,3 +391,9 @@ def add_subparsers(parser: argparse.ArgumentParser) -> None:
     p_health = subs.add_parser("health",
         help="One-shot health check (KPI/vault/jarvis/sentinel).")
     p_health.set_defaults(func=cmd_health)
+
+    p_walk = subs.add_parser("walk",
+        help="Garden walk — vault topology tour (hubs / bridges / orphans).")
+    p_walk.add_argument("--vault", metavar="PATH", default=None,
+        help="Vault path (default: $M5_VAULT_PATH or built-in default).")
+    p_walk.set_defaults(func=cmd_walk)

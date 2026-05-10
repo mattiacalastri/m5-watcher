@@ -430,6 +430,498 @@ class TestWebhookPost(unittest.TestCase):
         except Exception as exc:
             self.fail(f"webhook_post raised unexpectedly: {exc}")
 
+    def test_post_handles_unreachable_host_silently(self):
+        # _post must swallow every exception (fire-and-forget contract)
+        try:
+            cc._post("http://127.0.0.1:1/no_such_port", {"ping": True})
+        except Exception as exc:
+            self.fail(f"_post raised unexpectedly: {exc}")
+
+    def test_webhook_post_inside_running_loop_uses_to_thread(self):
+        import asyncio
+
+        async def run() -> None:
+            cc.webhook_post("http://127.0.0.1:1/no_such_port", {"hello": "world"})
+            # Yield once so the scheduled task settles
+            await asyncio.sleep(0)
+
+        # Must not raise, even though the URL is unreachable
+        asyncio.run(run())
+
+
+class TestCmdExportKpi(unittest.TestCase):
+
+    def _make_args(self, fmt: str = "csv"):
+        ns = argparse.Namespace()
+        ns.format = fmt
+        return ns
+
+    def test_missing_kpi_returns_1(self):
+        import io
+        from unittest.mock import patch
+        with patch.object(cc, "kpi_widget") as fake_kpi:
+            fake_kpi.read_kpi_data.return_value = {}
+            with patch("sys.stdout", new_callable=io.StringIO):
+                rc = cc.cmd_export_kpi(self._make_args(fmt="csv"))
+        self.assertEqual(rc, 1)
+
+    def test_kpi_read_error_returns_1(self):
+        import io
+        from unittest.mock import patch
+        with patch.object(cc, "kpi_widget") as fake_kpi:
+            fake_kpi.read_kpi_data.side_effect = RuntimeError("boom")
+            with patch("sys.stdout", new_callable=io.StringIO):
+                rc = cc.cmd_export_kpi(self._make_args())
+        self.assertEqual(rc, 1)
+
+    def test_csv_format_emits_header_and_rows(self):
+        import io
+        from unittest.mock import patch
+        kpi = {"mrr": 5000, "cac": 120}
+        buf = io.StringIO()
+        with patch.object(cc, "kpi_widget") as fake_kpi:
+            fake_kpi.read_kpi_data.return_value = kpi
+            with patch("sys.stdout", buf):
+                rc = cc.cmd_export_kpi(self._make_args(fmt="csv"))
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("key,value", out)
+        self.assertIn("mrr,5000", out)
+        self.assertIn("cac,120", out)
+
+    def test_json_format_is_valid_json(self):
+        import io
+        from unittest.mock import patch
+        kpi = {"mrr": 5000, "outstanding": 1200}
+        buf = io.StringIO()
+        with patch.object(cc, "kpi_widget") as fake_kpi:
+            fake_kpi.read_kpi_data.return_value = kpi
+            with patch("sys.stdout", buf):
+                rc = cc.cmd_export_kpi(self._make_args(fmt="json"))
+        self.assertEqual(rc, 0)
+        parsed = json.loads(buf.getvalue())
+        self.assertEqual(parsed["mrr"], 5000)
+        self.assertEqual(parsed["outstanding"], 1200)
+
+
+class TestCmdTailFeed(unittest.TestCase):
+
+    def _make_args(self):
+        return argparse.Namespace()
+
+    def test_missing_metrics_file_returns_0(self):
+        import io
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            ghost = Path(td) / "metrics.jsonl"
+            buf = io.StringIO()
+            with patch.object(cc, "_METRICS_FILE", ghost), patch("sys.stderr", buf):
+                rc = cc.cmd_tail_feed(self._make_args())
+        self.assertEqual(rc, 0)
+        self.assertIn("not found", buf.getvalue())
+
+
+class TestCmdWalk(unittest.TestCase):
+
+    def setUp(self):
+        import vault_parser as vp
+        self._vp = vp
+        self._tmp = tempfile.TemporaryDirectory(prefix="m5w_walk_")
+        self.vault = Path(self._tmp.name)
+        # Build a small vault with MOC + hub + leaf + orphan
+        (self.vault / "Areas").mkdir()
+        (self.vault / "Areas" / "MOC Atlas.md").write_text(
+            "---\nstatus: evergreen\n---\n[[Hub]] [[Leaf]]\n"
+        )
+        (self.vault / "Areas" / "Hub.md").write_text(
+            "---\nstatus: growing\n---\n[[Leaf]] [[MOC Atlas]]\n"
+        )
+        (self.vault / "Areas" / "Leaf.md").write_text("---\nstatus: seed\n---\nbody\n")
+        (self.vault / "Lonely.md").write_text("---\nstatus: stub\n---\nisland\n")
+        vp._cache = None
+        vp._cache_ts = 0.0
+
+    def tearDown(self):
+        self._vp._cache = None
+        self._vp._cache_ts = 0.0
+        self._tmp.cleanup()
+
+    def _args(self, vault: str | None = None):
+        ns = argparse.Namespace()
+        ns.vault = vault if vault is not None else str(self.vault)
+        return ns
+
+    def test_walk_returns_0_on_valid_vault(self):
+        import io
+        from unittest.mock import patch
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            rc = cc.cmd_walk(self._args())
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("VAULT", out)
+        self.assertIn("TOP HUB", out)
+        self.assertIn("ORFANI", out)
+        # Specific nodes from our fixture
+        self.assertIn("MOC Atlas", out)
+        self.assertIn("Lonely", out)
+
+    def test_walk_missing_vault_returns_1(self):
+        import io
+        from unittest.mock import patch
+        bogus = str(self.vault.parent / "definitely_not_there")
+        buf = io.StringIO()
+        with patch("sys.stderr", buf):
+            rc = cc.cmd_walk(self._args(vault=bogus))
+        self.assertEqual(rc, 1)
+        self.assertIn("walk", buf.getvalue())
+
+    def test_walk_empty_vault_returns_1(self):
+        import io
+        from unittest.mock import patch
+        empty = tempfile.TemporaryDirectory(prefix="m5w_walk_empty_")
+        try:
+            self._vp._cache = None
+            self._vp._cache_ts = 0.0
+            buf = io.StringIO()
+            with patch("sys.stderr", buf):
+                rc = cc.cmd_walk(self._args(vault=empty.name))
+            self.assertEqual(rc, 1)
+            self.assertIn("empty", buf.getvalue())
+        finally:
+            empty.cleanup()
+
+    def test_walk_subcommand_registered(self):
+        p = argparse.ArgumentParser()
+        cc.add_subparsers(p)
+        args = p.parse_args(["walk", "--vault", str(self.vault)])
+        self.assertEqual(args.cmd, "walk")
+        self.assertEqual(args.vault, str(self.vault))
+
+
+class TestCmdSnapshotErrorPaths(unittest.TestCase):
+
+    def _make_args(self, output=None):
+        ns = argparse.Namespace()
+        ns.pretty = False
+        ns.output = output
+        return ns
+
+    def test_snapshot_unwritable_path_returns_1(self):
+        import io
+        from unittest.mock import patch
+        # /proc/1/no_write is reliably unwritable on Linux; fall back to
+        # explicit OSError simulation via mkdir -p mock if needed.
+        bad = "/proc/1/no_write/snap.json"
+        buf = io.StringIO()
+        with patch("sys.stderr", buf), patch("sys.stdout", new_callable=io.StringIO):
+            rc = cc.cmd_snapshot(self._make_args(output=bad))
+        # Either the OS rejects mkdir, or the write fails — both go to rc=1
+        if rc != 1:
+            self.skipTest(f"unexpected: path turned out to be writable on this host (rc={rc})")
+        self.assertIn("snapshot", buf.getvalue())
+
+    def test_snapshot_swallows_each_data_source_failure(self):
+        """When every data source raises, the snapshot still serializes."""
+        import io
+        from unittest.mock import patch
+
+        def _explode(*a, **kw):
+            raise RuntimeError("synthetic boom")
+
+        async def _explode_async(*a, **kw):
+            raise RuntimeError("synthetic async boom")
+
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        with patch.object(cc.ds, "cpu_per_core", side_effect=_explode_async), \
+             patch.object(cc.ds, "unified_memory", side_effect=_explode), \
+             patch.object(cc.ds, "battery", side_effect=_explode), \
+             patch.object(cc.ds, "top_processes", side_effect=_explode), \
+             patch.object(cc.ds, "tentacoli", side_effect=_explode), \
+             patch.object(cc.ds, "current_focus", side_effect=_explode), \
+             patch.object(cc.ds, "log_feed", side_effect=_explode), \
+             patch.object(cc.kpi_widget, "read_kpi_data", side_effect=_explode), \
+             patch("sys.stderr", buf_err), \
+             patch("sys.stdout", buf_out):
+            rc = cc.cmd_snapshot(self._make_args())
+        self.assertEqual(rc, 0)
+        # JSON still parseable
+        snap = json.loads(buf_out.getvalue())
+        # Every section that supports an "error" key reflects the failure
+        for key in ("memory", "battery", "focus", "kpi"):
+            self.assertIn("error", snap[key])
+        # Sources that fall back to empty list/lists
+        self.assertEqual(snap["cpu_per_core"], [])
+        self.assertEqual(snap["processes"], [])
+        self.assertEqual(snap["tentacoli"], [])
+        self.assertEqual(snap["logs"], [])
+
+    def test_snapshot_json_dumps_failure_returns_1(self):
+        """If json.dumps fails (non-serialisable object), returns 1 with stderr message."""
+        import io
+        from unittest.mock import patch
+        buf = io.StringIO()
+        with patch("cli_commands.json.dumps", side_effect=TypeError("unserialisable")), \
+             patch("sys.stderr", buf), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            rc = cc.cmd_snapshot(self._make_args())
+        self.assertEqual(rc, 1)
+        self.assertIn("json.dumps failed", buf.getvalue())
+
+
+class TestCmdHealthErrorPaths(unittest.TestCase):
+
+    def test_health_kpi_read_error_records_error_status(self):
+        import io
+        from unittest.mock import patch
+        buf = io.StringIO()
+        with patch.object(cc, "kpi_widget") as fake_kpi, \
+             patch("sys.stdout", buf):
+            fake_kpi.read_kpi_data.side_effect = RuntimeError("boom")
+            rc = cc.cmd_health(argparse.Namespace())
+        data = json.loads(buf.getvalue())
+        self.assertEqual(rc, 2)
+        self.assertEqual(data["verdict"], "ERROR")
+        kpi_check = next(c for c in data["checks"] if c["name"] == "kpi_loaded")
+        self.assertEqual(kpi_check["status"], "ERROR")
+
+
+class TestCmdWalkErrorPaths(unittest.TestCase):
+
+    def test_walk_vault_graph_data_raises_returns_1(self):
+        import io
+        from unittest.mock import patch
+        buf = io.StringIO()
+        with patch.object(cc.vault_parser, "vault_graph_data", side_effect=RuntimeError("crash")), \
+             patch("sys.stderr", buf):
+            ns = argparse.Namespace()
+            ns.vault = None
+            rc = cc.cmd_walk(ns)
+        self.assertEqual(rc, 1)
+        self.assertIn("vault_graph_data failed", buf.getvalue())
+
+
+# =============================================================================
+# vault_parser — hermetic vault tests (no dependency on user's Obsidian vault)
+# =============================================================================
+
+import vault_parser as _vp
+
+
+class TestVaultParserHermetic(unittest.TestCase):
+    """Exercise vault_parser.vault_graph_data branches with a synthetic vault."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="m5w_vault_")
+        self.vault = Path(self._tmp.name)
+        _vp._cache = None
+        _vp._cache_ts = 0.0
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        _vp._cache = None
+        _vp._cache_ts = 0.0
+
+    def _write(self, rel: str, body: str) -> None:
+        p = self.vault / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+
+    def test_missing_vault_returns_error_dict(self):
+        out = _vp.vault_graph_data(vault=self.vault.parent / "definitely_not_there")
+        self.assertIn("error", out)
+        self.assertEqual(out["stats"]["total"], 0)
+
+    def test_classify_moc_orphan_normal(self):
+        self._write("Areas/MOC Atlas.md", "[[Hub]]\n")
+        self._write("Areas/Hub.md", "[[Leaf]] [[MOC Atlas]]\n")
+        self._write("Areas/Leaf.md", "body\n")
+        self._write("Areas/Lonely.md", "lone island\n")
+        out = _vp.vault_graph_data(vault=self.vault)
+        G = out["graph"]
+        # MOC: name starts with MOC → 'moc' regardless of in-degree
+        self.assertEqual(G.nodes["MOC Atlas"]["type"], "moc")
+        # Hub has incoming edge from MOC Atlas → 'normal'
+        self.assertEqual(G.nodes["Hub"]["type"], "normal")
+        # Lonely has no inbound edges → 'orphan'
+        self.assertEqual(G.nodes["Lonely"]["type"], "orphan")
+
+    def test_status_distribution_parsed(self):
+        self._write("a.md", "---\nstatus: seed\n---\n[[b]]\n")
+        self._write("b.md", "---\nstatus: growing\n---\n[[a]]\n")
+        self._write("c.md", "---\nstatus: evergreen\n---\n[[a]]\n")
+        self._write("d.md", "---\nstatus: stub\n---\n[[a]]\n")
+        out = _vp.vault_graph_data(vault=self.vault)
+        dist = out["intel"]["status_dist"]
+        self.assertEqual(dist["seed"], 1)
+        self.assertEqual(dist["growing"], 1)
+        self.assertEqual(dist["evergreen"], 1)
+        self.assertEqual(dist["stub"], 1)
+
+    def test_wikilinks_with_pipe_and_anchor(self):
+        # [[Target|Display]] and [[Target#Section]] should both resolve to "Target"
+        self._write("source.md", "[[Target|alt label]] and [[Target#heading]]\n")
+        self._write("Target.md", "real target\n")
+        out = _vp.vault_graph_data(vault=self.vault)
+        self.assertTrue(out["graph"].has_edge("source", "Target"))
+
+    def test_self_loops_filtered(self):
+        # A wikilink to the same stem must not create a self-edge
+        self._write("only.md", "[[only]] self ref\n")
+        out = _vp.vault_graph_data(vault=self.vault)
+        self.assertFalse(out["graph"].has_edge("only", "only"))
+
+    def test_folder_distribution(self):
+        self._write("Projects/p.md", "[[Atlas/a]]\n")
+        self._write("Atlas/a.md", "leaf\n")
+        out = _vp.vault_graph_data(vault=self.vault)
+        folder_dist = out["intel"]["folder_dist"] if "folder_dist" in out["intel"] else {}
+        # First-level dir counted; root-level files would land in "_root"
+        self.assertIn("Projects", folder_dist)
+        self.assertIn("Atlas", folder_dist)
+
+    def test_cache_is_used_on_second_call(self):
+        self._write("a.md", "[[b]]\n")
+        self._write("b.md", "leaf\n")
+        first = _vp.vault_graph_data(vault=self.vault)
+        # Mutate the cache marker so we can detect a re-parse
+        first["__cache_marker__"] = True
+        second = _vp.vault_graph_data(vault=self.vault)
+        self.assertIs(first, second)
+        self.assertTrue(second.get("__cache_marker__"))
+
+    def test_load_semantic_communities_missing_file(self):
+        # When semantic_areas.json is unreadable / absent, returns []
+        from unittest.mock import patch
+        with patch.object(_vp, "_SEMANTIC_AREAS_PATH", self.vault / "missing.json"):
+            self.assertEqual(_vp._load_semantic_communities(), [])
+
+    def test_load_semantic_communities_parses_json(self):
+        from unittest.mock import patch
+        sem = self.vault / "sem.json"
+        sem.write_text(json.dumps({
+            "communities": [
+                {"label": "Marketing", "size": 42, "top_hubs": ["A", "B", "C", "D"]},
+                {"label": "Ops",       "size": 17, "top_hubs": ["X"]},
+            ]
+        }))
+        with patch.object(_vp, "_SEMANTIC_AREAS_PATH", sem):
+            out = _vp._load_semantic_communities()
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0]["label"], "Marketing")
+        # top_hubs is sliced to 3 max
+        self.assertEqual(out[0]["top_hubs"], ["A", "B", "C"])
+
+    def test_intel_keys_present_for_hermetic_vault(self):
+        for i in range(12):
+            self._write(f"n{i}.md", f"[[n{(i + 1) % 12}]] [[n{(i + 2) % 12}]]\n")
+        out = _vp.vault_graph_data(vault=self.vault)
+        for key in ("density", "clustering", "giant_ratio", "avg_degree",
+                    "n_clusters", "recent_7d", "top_indegree", "top_bridges",
+                    "status_dist", "recent_today", "folder_dist"):
+            self.assertIn(key, out["intel"], f"missing intel key: {key}")
+        self.assertEqual(out["stats"]["total"], 12)
+
+
+# =============================================================================
+# plugin_loader — discovery & registry
+# =============================================================================
+
+import plugin_loader as _pl
+
+
+class TestPluginLoader(unittest.TestCase):
+    """Cover the registry decorator + discover_plugins import paths."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="m5w_plugins_")
+        self.plugin_dir = Path(self._tmp.name)
+        _pl.clear_registry()
+
+    def tearDown(self):
+        _pl.clear_registry()
+        # Clean up modules we injected so subsequent tests get fresh imports
+        for name in list(sys.modules):
+            if name.startswith("_m5_plugin_"):
+                del sys.modules[name]
+        self._tmp.cleanup()
+
+    def _write_plugin(self, filename: str, body: str) -> None:
+        (self.plugin_dir / filename).write_text(body, encoding="utf-8")
+
+    def test_register_tab_appends_to_registry(self):
+        self._write_plugin("ok.py", (
+            "from plugin_loader import register_tab\n"
+            "from textual.widgets import Static\n"
+            "@register_tab(id='tab-ok', label='OK', key='o')\n"
+            "def make() -> Static: return Static('hi')\n"
+        ))
+        tabs = _pl.discover_plugins(self.plugin_dir)
+        self.assertEqual(len(tabs), 1)
+        tab = tabs[0]
+        self.assertEqual(tab.id, "tab-ok")
+        self.assertEqual(tab.label, "OK")
+        self.assertEqual(tab.key_binding, "o")
+        # repr is informative
+        self.assertIn("tab-ok", repr(tab))
+
+    def test_discover_skips_underscore_prefixed_files(self):
+        self._write_plugin("__init__.py", "")
+        self._write_plugin("_private.py", (
+            "from plugin_loader import register_tab\n"
+            "from textual.widgets import Static\n"
+            "@register_tab(id='hidden', label='Hidden')\n"
+            "def make(): return Static('no')\n"
+        ))
+        self.assertEqual(_pl.discover_plugins(self.plugin_dir), [])
+
+    def test_discover_returns_empty_for_missing_dir(self):
+        bogus = self.plugin_dir / "not_a_dir"
+        self.assertEqual(_pl.discover_plugins(bogus), [])
+
+    def test_failed_plugin_import_is_swallowed(self):
+        self._write_plugin("broken.py", "raise RuntimeError('boom')\n")
+        # Discovery must not raise — the broken file is logged and skipped
+        result = _pl.discover_plugins(self.plugin_dir)
+        self.assertEqual(result, [])
+        # And the broken module must not linger in sys.modules
+        self.assertNotIn("_m5_plugin_broken", sys.modules)
+
+    def test_already_loaded_plugin_is_skipped(self):
+        self._write_plugin("once.py", (
+            "from plugin_loader import register_tab\n"
+            "from textual.widgets import Static\n"
+            "@register_tab(id='once', label='Once')\n"
+            "def make(): return Static('x')\n"
+        ))
+        first = _pl.discover_plugins(self.plugin_dir)
+        # Second discovery without clear_registry: registry remains, no re-import
+        second = _pl.discover_plugins(self.plugin_dir)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+
+    def test_clear_registry_resets_state(self):
+        self._write_plugin("p.py", (
+            "from plugin_loader import register_tab\n"
+            "from textual.widgets import Static\n"
+            "@register_tab(id='p', label='P')\n"
+            "def make(): return Static('y')\n"
+        ))
+        _pl.discover_plugins(self.plugin_dir)
+        self.assertGreater(len(_pl._REGISTRY), 0)
+        _pl.clear_registry()
+        self.assertEqual(_pl._REGISTRY, [])
+
+    def test_default_plugin_dir_resolves_to_project_plugins(self):
+        # Without arg, scans <repo>/plugins/. The shipped claude_advisor plugin
+        # may or may not register a tab depending on its own preconditions, but
+        # discovery itself must not raise.
+        try:
+            _pl.discover_plugins()
+        except Exception as exc:
+            self.fail(f"discover_plugins() raised: {exc}")
+
 
 # =============================================================================
 # Entry point

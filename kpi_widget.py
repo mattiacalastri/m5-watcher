@@ -81,11 +81,66 @@ _cache:    dict | None = None
 _cache_ts: float       = 0.0
 _CACHE_TTL             = 30.0
 
-_TARGET_MRR  = 10_000.0
-_TARGET_CASH = 10_000.0
-_TARGET_PIPE = 20_000.0
-_COLD_GOAL   = 30.0   # gg target media inattività
-_COLD_LIMIT  = 90.0   # gg soglia lead stale
+# sess.1758: target estratti da YAML config (~/.config/astra/kpi_targets.yaml)
+# con fallback ai default storici. Mattia può sovrascrivere senza toccare il
+# codice. Mai più "perché TUI mostra 10k MRR target se sto puntando a 15k".
+_KPI_TARGETS_FILE = Path.home() / ".config" / "astra" / "kpi_targets.yaml"
+_KPI_TARGETS_DEFAULTS = {
+    "target_mrr_eur":      10_000.0,
+    "target_cash_eur":     10_000.0,
+    "target_pipeline_eur": 20_000.0,
+    "cold_goal_days":      30.0,   # target media inattività lead
+    "cold_limit_days":     90.0,   # soglia lead stale
+    # Polestar (roadmap_polestar.py)
+    "outstanding_target_eur": 3_000.0,
+    "mrr_target_q2_eur":      5_200.0,
+    "kill_target_amount_eur": 2_500.0,
+    # Trap (roadmap_traps.py)
+    "trap_commit_per_24h": 5.0,
+    "trap_open_projects":  3.0,
+    "trap_stale_memory":   100.0,
+    "trap_future_events":  40.0,
+}
+_kpi_targets_cache:    dict | None = None
+_kpi_targets_cache_ts: float       = 0.0
+_KPI_TARGETS_TTL                   = 60.0
+
+
+def _load_kpi_targets() -> dict:
+    """Read KPI targets da YAML config con fallback ai default. TTL 60s.
+
+    File schema (~/.config/astra/kpi_targets.yaml):
+        target_mrr_eur: 12000.0
+        target_cash_eur: 8000.0
+        target_pipeline_eur: 25000.0
+        cold_goal_days: 30
+        cold_limit_days: 90
+
+    Mancano chiavi → fallback sui default. File assente → tutto default.
+    """
+    global _kpi_targets_cache, _kpi_targets_cache_ts
+    now = time.monotonic()
+    if _kpi_targets_cache is not None and now - _kpi_targets_cache_ts < _KPI_TARGETS_TTL:
+        return _kpi_targets_cache
+    out = dict(_KPI_TARGETS_DEFAULTS)
+    out["_source"] = "defaults"
+    if _KPI_TARGETS_FILE.exists():
+        try:
+            import yaml as _yaml  # type: ignore
+            data = _yaml.safe_load(_KPI_TARGETS_FILE.read_text()) or {}
+            if isinstance(data, dict):
+                for k in _KPI_TARGETS_DEFAULTS:
+                    if k in data:
+                        try:
+                            out[k] = float(data[k])
+                        except (TypeError, ValueError):
+                            pass
+                out["_source"] = "yaml_config"
+        except Exception:
+            pass
+    _kpi_targets_cache = out
+    _kpi_targets_cache_ts = now
+    return out
 
 
 def read_kpi_data(path: Path | None = None) -> dict:
@@ -140,9 +195,13 @@ def _cold_color(cold_avg: float) -> str:
     """
     if not math.isfinite(cold_avg) or cold_avg < 0:
         return DIM
-    if cold_avg >= _COLD_LIMIT * 2 / 3:   # ≥ 60gg
+    # sess.1758: soglie cold da config invece di hard-coded.
+    targets = _load_kpi_targets()
+    cold_limit = targets["cold_limit_days"]
+    cold_goal = targets["cold_goal_days"]
+    if cold_avg >= cold_limit * 2 / 3:
         return HOT_PINK
-    if cold_avg >= _COLD_GOAL:            # ≥ 30gg
+    if cold_avg >= cold_goal:
         return ORANGE
     return LIME
 
@@ -169,15 +228,22 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
     def _fmt_eur(v: float) -> str:
         return eur_compact(v) if abs(v) >= 1_000_000 else eur_full(v)
 
+    # sess.1758: target da YAML config invece di hard-coded.
+    targets = _load_kpi_targets()
+    target_mrr  = targets["target_mrr_eur"]
+    target_cash = targets["target_cash_eur"]
+    target_pipe = targets["target_pipeline_eur"]
+    cold_limit  = targets["cold_limit_days"]
+
     delta       = mrr - mrr_prev
     delta_s     = ('+' if delta >= 0 else '') + _fmt_eur(delta)
     delta_color = LIME if delta >= 0 else HOT_PINK
-    mrr_pct     = min(mrr      / _TARGET_MRR  * 100, 100)
-    out_pct     = min(outstand / _TARGET_CASH * 100, 100)
-    pipe_pct    = min(pipeline / _TARGET_PIPE * 100, 100)
+    mrr_pct     = min(mrr      / target_mrr  * 100, 100) if target_mrr > 0 else 0
+    out_pct     = min(outstand / target_cash * 100, 100) if target_cash > 0 else 0
+    pipe_pct    = min(pipeline / target_pipe * 100, 100) if target_pipe > 0 else 0
     conv_pct    = min((active  / tot_leads    * 100) if tot_leads > 0 else 0, 100)
     cold        = max(0.0, tot_leads - active)
-    cold_pct    = min(cold_avg / _COLD_LIMIT * 100, 100)
+    cold_pct    = min(cold_avg / cold_limit * 100, 100) if cold_limit > 0 else 0
     cold_color  = _cold_color(cold_avg)
 
     # sess.1525: append ai deque storici per sparkline. Append condizionato:
@@ -220,7 +286,7 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
     lines += row(
         "💰", LIME, "MRR", mrr_pct, LIME,
         mrr_value_str,
-        f"[{delta_color}]{delta_s}[/] [{DIM}]vs prev · goal {_fmt_eur(_TARGET_MRR)} · {mrr_pct:.0f}%[/]",
+        f"[{delta_color}]{delta_s}[/] [{DIM}]vs prev · goal {_fmt_eur(target_mrr)} · {mrr_pct:.0f}%[/]",
     )
     lines.append("")
     # sess.1525: alert visivo quando Outstanding > MRR (incassi attesi
@@ -247,7 +313,7 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
     lines += row(
         "🎯", ELEC_BLUE, "Pipeline", pipe_pct, ELEC_BLUE,
         pipe_value_str,
-        f"[{DIM}]weighted · goal {_fmt_eur(_TARGET_PIPE)} · {pipe_pct:.0f}%[/]",
+        f"[{DIM}]weighted · goal {_fmt_eur(target_pipe)} · {pipe_pct:.0f}%[/]",
     )
     lines.append("")
     lines.append(f"  [{DIM}]── PI  Pipeline Indicators  ·  setter · lead commerciali ──────────[/]")
@@ -261,7 +327,7 @@ def render_kpi(kpi: dict, w: int = 28) -> str:
     lines += row(
         "🕐", cold_color, "Cold Avg", cold_pct, cold_color,
         f"{cold_avg:.1f} gg",
-        f"[{DIM}]media gg inattività per lead freddo · goal < {int(_COLD_GOAL)} gg[/]",
+        f"[{DIM}]media gg inattività per lead freddo · goal < {int(targets['cold_goal_days'])} gg[/]",
     )
     return "\n".join(lines)
 

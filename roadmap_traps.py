@@ -52,15 +52,34 @@ CALENDAR_CACHE = HOME / ".local" / "share" / "polpo" / "calendar_cache.json"
 # Trap-check sentinel (Trap 1)
 TRAP_CHECK_FILE = Path("/tmp/last_trap_check.txt")
 
-# Soglie
-TRAP1_COMMIT_THRESHOLD = 5            # >5 commit /24h
-TRAP2_PROJECT_THRESHOLD = 3           # >3 progetti aperti senza chiusura
-TRAP2_OPEN_DAYS = 7                   # modificati ultimi 7gg
+# Soglie — sess.1758: TRAP1/TRAP2/TRAP4/TRAP5 ora YAML config-driven
+# (~/.config/astra/kpi_targets.yaml). TRAP2_OPEN_DAYS/CLOSE_DAYS e TRAP3_*
+# restano in codice (window operative semantica fissa, non drift-prone).
+_DEFAULT_TRAP1 = 5
+_DEFAULT_TRAP2 = 3
+_DEFAULT_TRAP4 = 100
+_DEFAULT_TRAP5 = 40
+
+
+def _load_trap_thresholds():
+    try:
+        from kpi_widget import _load_kpi_targets
+        t = _load_kpi_targets()
+        return (
+            int(t.get("trap_commit_per_24h", _DEFAULT_TRAP1)),
+            int(t.get("trap_open_projects",  _DEFAULT_TRAP2)),
+            int(t.get("trap_stale_memory",   _DEFAULT_TRAP4)),
+            int(t.get("trap_future_events",  _DEFAULT_TRAP5)),
+        )
+    except Exception:
+        return _DEFAULT_TRAP1, _DEFAULT_TRAP2, _DEFAULT_TRAP4, _DEFAULT_TRAP5
+
+
+TRAP1_COMMIT_THRESHOLD, TRAP2_PROJECT_THRESHOLD, TRAP4_STALE_THRESHOLD, TRAP5_EVENT_THRESHOLD = _load_trap_thresholds()
+TRAP2_OPEN_DAYS = 7                   # modificati ultimi 7gg (window fissa)
 TRAP2_CLOSE_DAYS = 14                 # commit DONE/COMPLETE/FINAL ultimi 14gg
 TRAP3_VAULT_FRESH_HOURS = 6           # session_current updated max 6h fa
 TRAP3_MRR_DRIFT_TOLERANCE = 50        # delta MRR tollerato
-TRAP4_STALE_THRESHOLD = 100           # >100 stale memory
-TRAP5_EVENT_THRESHOLD = 40            # >40 eventi futuri 4 settimane
 
 _PROC_TIMEOUT = 3.0
 

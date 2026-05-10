@@ -24,11 +24,37 @@ from roadmap_common import (
     MONTH_LOOKUP, PhaseState, cached, parse_frontmatter, read_text,
 )
 
-# Costanti fase RADICI (target di prodotto, non drift-prone)
-OUTSTANDING_TARGET = 3000          # Outstanding < €3.000
-MRR_TARGET_Q2      = 5200          # MRR >= €5.200
-KILL_DATE          = date(2026, 7, 17)   # T+3m kill check
-KILL_TARGET_AMOUNT = 2500          # ≥€2.500 cliente forgiatura
+# sess.1758: target ora YAML-config con fallback ai default storici.
+# Configurazione ~/.config/astra/kpi_targets.yaml — Mattia li aggiorna live
+# senza toccare il codice. KILL_DATE resta in codice (data ancorata).
+_DEFAULT_OUTSTANDING_TARGET = 3000
+_DEFAULT_MRR_TARGET_Q2      = 5200
+_DEFAULT_KILL_TARGET_AMOUNT = 2500
+
+
+def _load_polestar_targets():
+    """Read polestar targets via kpi_widget loader (TTL 60s).
+
+    Fallback ai default storici se YAML manca o chiavi assenti.
+    """
+    try:
+        from kpi_widget import _load_kpi_targets
+        t = _load_kpi_targets()
+        return (
+            float(t.get("outstanding_target_eur", _DEFAULT_OUTSTANDING_TARGET)),
+            float(t.get("mrr_target_q2_eur",      _DEFAULT_MRR_TARGET_Q2)),
+            float(t.get("kill_target_amount_eur", _DEFAULT_KILL_TARGET_AMOUNT)),
+        )
+    except Exception:
+        return (
+            float(_DEFAULT_OUTSTANDING_TARGET),
+            float(_DEFAULT_MRR_TARGET_Q2),
+            float(_DEFAULT_KILL_TARGET_AMOUNT),
+        )
+
+
+OUTSTANDING_TARGET, MRR_TARGET_Q2, KILL_TARGET_AMOUNT = _load_polestar_targets()
+KILL_DATE = date(2026, 7, 17)   # T+3m kill check (data ancorata, non config)
 
 
 # ---------------------------------------------------------------------------

@@ -521,6 +521,84 @@ class TestCmdTailFeed(unittest.TestCase):
         self.assertIn("not found", buf.getvalue())
 
 
+class TestCmdWalk(unittest.TestCase):
+
+    def setUp(self):
+        import vault_parser as vp
+        self._vp = vp
+        self._tmp = tempfile.TemporaryDirectory(prefix="m5w_walk_")
+        self.vault = Path(self._tmp.name)
+        # Build a small vault with MOC + hub + leaf + orphan
+        (self.vault / "Areas").mkdir()
+        (self.vault / "Areas" / "MOC Atlas.md").write_text(
+            "---\nstatus: evergreen\n---\n[[Hub]] [[Leaf]]\n"
+        )
+        (self.vault / "Areas" / "Hub.md").write_text(
+            "---\nstatus: growing\n---\n[[Leaf]] [[MOC Atlas]]\n"
+        )
+        (self.vault / "Areas" / "Leaf.md").write_text("---\nstatus: seed\n---\nbody\n")
+        (self.vault / "Lonely.md").write_text("---\nstatus: stub\n---\nisland\n")
+        vp._cache = None
+        vp._cache_ts = 0.0
+
+    def tearDown(self):
+        self._vp._cache = None
+        self._vp._cache_ts = 0.0
+        self._tmp.cleanup()
+
+    def _args(self, vault: str | None = None):
+        ns = argparse.Namespace()
+        ns.vault = vault if vault is not None else str(self.vault)
+        return ns
+
+    def test_walk_returns_0_on_valid_vault(self):
+        import io
+        from unittest.mock import patch
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            rc = cc.cmd_walk(self._args())
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("VAULT", out)
+        self.assertIn("TOP HUB", out)
+        self.assertIn("ORFANI", out)
+        # Specific nodes from our fixture
+        self.assertIn("MOC Atlas", out)
+        self.assertIn("Lonely", out)
+
+    def test_walk_missing_vault_returns_1(self):
+        import io
+        from unittest.mock import patch
+        bogus = str(self.vault.parent / "definitely_not_there")
+        buf = io.StringIO()
+        with patch("sys.stderr", buf):
+            rc = cc.cmd_walk(self._args(vault=bogus))
+        self.assertEqual(rc, 1)
+        self.assertIn("walk", buf.getvalue())
+
+    def test_walk_empty_vault_returns_1(self):
+        import io
+        from unittest.mock import patch
+        empty = tempfile.TemporaryDirectory(prefix="m5w_walk_empty_")
+        try:
+            self._vp._cache = None
+            self._vp._cache_ts = 0.0
+            buf = io.StringIO()
+            with patch("sys.stderr", buf):
+                rc = cc.cmd_walk(self._args(vault=empty.name))
+            self.assertEqual(rc, 1)
+            self.assertIn("empty", buf.getvalue())
+        finally:
+            empty.cleanup()
+
+    def test_walk_subcommand_registered(self):
+        p = argparse.ArgumentParser()
+        cc.add_subparsers(p)
+        args = p.parse_args(["walk", "--vault", str(self.vault)])
+        self.assertEqual(args.cmd, "walk")
+        self.assertEqual(args.vault, str(self.vault))
+
+
 class TestCmdSnapshotErrorPaths(unittest.TestCase):
 
     def _make_args(self, output=None):

@@ -2227,12 +2227,12 @@ class M5Watcher(App):
                         yield Static("", id="canary-static")
                     with ScrollableContainer(id="alerts-panel"):
                         yield Static("", id="alerts-static")
-            # sess.1602: outbound voice agent — Marco GEO live + history.
+            # sess.1602: outbound voice agent — Andrea GEO live + history.
             with TabPane("☎️ Voice Agents", id="tab-voiceagents"):
                 with ScrollableContainer(id="voiceagents-scroll"):
                     yield Static(
                         f"[bold {HOT_PINK}]☎️  OUTBOUND VOICE AGENTS[/]  "
-                        f"[{DIM}]· Marco GEO · live + history[/]\n"
+                        f"[{DIM}]· Andrea GEO · live + history[/]\n"
                         f"[italic {DIM}]Volume, budget, opt-out e kill switch — il fuoco controllato.[/]",
                         id="voiceagents-header")
                     yield Static("", id="voiceagents-status", markup=True)
@@ -2572,10 +2572,11 @@ class M5Watcher(App):
         lt = self.query_one("#log-table", DataTable)
         lt.add_columns("Time", " ", "Event", "Source", "Detail")
         # sess.1602+1683: Voice Agents call log — most recent first
-        # 9 col: TIME · TO · LEAD · AZIENDA · DUR · INTENT · SENT · OUTCOME · COST
+        # sess.1768: 10 col — TIME · TO · LEAD · AZIENDA (con prov) · CATEGORIA · SRC · DUR · INTENT · SENT · OUTCOME · COST
+        # (era 9 col, sess.1758). SRC = apify/overpass/playwright/manual.
         vt = self.query_one("#voiceagents-table", DataTable)
-        vt.add_columns("TIME", "TO", "LEAD", "AZIENDA", "DUR",
-                       "INTENT", "SENT", "OUTCOME", "COST")
+        vt.add_columns("TIME", "TO", "LEAD", "AZIENDA", "CATEGORIA",
+                       "SRC", "DUR", "INTENT", "SENT", "OUTCOME", "COST")
         # sess.1607: Feed Tab — 4 DataTable severity-aware (populator fill rows)
         ot = self.query_one("#outstanding-table", DataTable)
         ot.add_columns("Cliente", "€", "D+", "Stato", "Note")
@@ -2955,7 +2956,7 @@ class M5Watcher(App):
         self._metrics.record_slow((time.perf_counter() - _t_slow) * 1000.0)
         self._metrics.record_rss()
 
-        # sess.1683: LIVE CALL accelerator — quando Marco GEO ha call IN CORSO
+        # sess.1683: LIVE CALL accelerator — quando Andrea GEO ha call IN CORSO
         # accelera prossimo refresh slow 5s→2s per durata che scorre + transcript
         # live. Schedulato come one-shot timer, non sostituisce set_interval(5s).
         try:
@@ -3236,7 +3237,7 @@ class M5Watcher(App):
         self.notify(f"🛡  Sentinel  ·  {n_canaries} canary  ·  {n_alerts} alerts", timeout=1.5)
 
     def action_show_tab_voiceagents(self) -> None:
-        """Tab Voice Agents — sess.1602 outbound voice (Marco GEO)."""
+        """Tab Voice Agents — sess.1602 outbound voice (Andrea GEO)."""
         self.query_one(TabbedContent).active = "tab-voiceagents"
         d = self._voiceagents_data or {}
         en = "✅ ENABLED" if d.get('enabled') else "🔴 DISABLED"
@@ -3715,13 +3716,50 @@ class M5Watcher(App):
             vt.clear()
             # Helper empty cell
             empty = f"[{DIM}]—[/]"
-            # Section A — IN-FLIGHT divider + rows
+
+            # sess.1768 helpers — compact provincia + source colorato
+            _PROV_MAP = {
+                'verona': 'VR', 'milano': 'MI', 'roma': 'RM', 'torino': 'TO',
+                'napoli': 'NA', 'firenze': 'FI', 'bologna': 'BO', 'venezia': 'VE',
+                'padova': 'PD', 'vicenza': 'VI', 'treviso': 'TV', 'brescia': 'BS',
+                'bergamo': 'BG', 'genova': 'GE', 'palermo': 'PA', 'catania': 'CT',
+                'bari': 'BA', 'cagliari': 'CA', 'trento': 'TN', 'bolzano': 'BZ',
+                'trieste': 'TS', 'udine': 'UD', 'parma': 'PR', 'modena': 'MO',
+                'reggio emilia': 'RE', 'rimini': 'RN', 'ferrara': 'FE',
+                'mantova': 'MN', 'cremona': 'CR', 'pavia': 'PV', 'lecco': 'LC',
+                'como': 'CO', 'varese': 'VA', 'monza': 'MB', 'novara': 'NO',
+            }
+            def _prov_compact(p: str) -> str:
+                if not p or p == '—':
+                    return ''
+                pl = p.strip().lower()
+                if pl in _PROV_MAP:
+                    return _PROV_MAP[pl]
+                # Fallback: già 2-letter code uppercase, oppure first 3 chars upper
+                ps = p.strip()
+                if len(ps) == 2 and ps.isupper():
+                    return ps
+                return ps[:3].upper()
+
+            def _src_cell(src: str) -> str:
+                s = (src or '').strip().lower()
+                if s.startswith('apify'):
+                    return f"[{ELEC_BLUE}]🛰 apify[/]"
+                if s.startswith('overpass'):
+                    return f"[{LIME}]🗺 ovrp[/]"
+                if s.startswith('playwright'):
+                    return f"[{YELLOW}]🎭 plw[/]"
+                if s in ('manual', 'crm', 'ghl'):
+                    return f"[{DIM}]· {s}[/]"
+                return empty
+
+            # Section A — IN-FLIGHT divider + rows (11 col)
             if in_flight:
                 # Divider span: usiamo solo cella LEAD per il banner
                 vt.add_row(
                     "", "",
                     f"[bold {ELEC_BLUE}]━━━ 📞 IN-FLIGHT ({len(in_flight)}) ━━━━━━━━━━━━━━━[/]",
-                    "", "", "", "", "", "",
+                    "", "", "", "", "", "", "", "",
                 )
                 for r in in_flight:
                     status_label = r['status']
@@ -3735,24 +3773,26 @@ class M5Watcher(App):
                         f"[{DIM}]{r['age']}[/]",
                         f"[{WHITE}]{r['phone_masked']}[/]",
                         f"{r['lead']}",
-                        empty,
-                        empty,
-                        f"[{DIM}]—[/]",
-                        f"[{DIM}]·[/]",
-                        status_cell,
-                        f"[{DIM}]r{r['retry']}[/]",
+                        empty,                           # AZIENDA
+                        empty,                           # CATEGORIA
+                        empty,                           # SRC
+                        empty,                           # DUR
+                        f"[{DIM}]—[/]",                  # INTENT
+                        f"[{DIM}]·[/]",                  # SENT
+                        status_cell,                     # OUTCOME (status in flight)
+                        f"[{DIM}]r{r['retry']}[/]",      # COST (retry counter in flight)
                     )
-            # Section B — RECENT completed divider + rows
+            # Section B — RECENT completed divider + rows (11 col)
             vt.add_row(
                 "", "",
                 f"[bold {LIME}]━━━ ✅ RECENT (last {len(recent_calls)}) ━━━━━━━━━━━━━━━[/]",
-                "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "",
             )
             if not recent_calls:
                 vt.add_row(
                     empty, empty,
                     f"[italic {DIM}]Nessuna call completata — solo dispatched in volo[/]",
-                    empty, empty, empty, empty, empty, empty,
+                    empty, empty, empty, empty, empty, empty, empty, empty,
                 )
             else:
                 for c in recent_calls:
@@ -3808,13 +3848,27 @@ class M5Watcher(App):
                     if azienda_disp == '—' or not azienda_disp.strip():
                         azienda_cell = empty
                     else:
-                        azienda_cell = azienda_disp
+                        # sess.1768: compact provincia inline → "Studio X (VR)"
+                        prov_compact = _prov_compact(c.get('provincia') or '')
+                        if prov_compact:
+                            azienda_cell = f"[{DIM}]{azienda_disp}[/] [{ELEC_BLUE}]({prov_compact})[/]"
+                        else:
+                            azienda_cell = f"[{DIM}]{azienda_disp}[/]"
+                    # Categoria + Source cells (sess.1768)
+                    cat_disp = c.get('categoria') or '—'
+                    if cat_disp == '—' or not cat_disp.strip():
+                        cat_cell = empty
+                    else:
+                        cat_cell = f"[{DIM}]{cat_disp}[/]"
+                    src_cell = _src_cell(c.get('source') or '')
 
                     vt.add_row(
                         f"[{DIM}]{c['time']}[/]",
                         f"[{WHITE}]{c['to_masked']}[/]",
                         lead_cell,
-                        f"[{DIM}]{azienda_cell}[/]",
+                        azienda_cell,
+                        cat_cell,
+                        src_cell,
                         f"[{ELEC_BLUE}]{dur_str:>7}[/]",
                         intent_cell,
                         sent_cell,

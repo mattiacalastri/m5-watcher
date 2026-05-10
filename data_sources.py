@@ -1241,7 +1241,7 @@ def log_feed(max_per_source: int = 25) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Voice Agents feed — sess.1602 (Polpo Outbound Voice · Marco GEO)
+# Voice Agents feed — sess.1602 (Polpo Outbound Voice · Andrea GEO)
 # Sorgenti:
 #   - ~/.local/share/polpo_voice_agent/calls/*.json    (1 file per call)
 #   - ~/.local/share/polpo_voice_agent/optout.jsonl    (registry permanente)
@@ -1584,9 +1584,12 @@ def _voice_normalize_el_conv(ec: dict) -> dict:
         'time':         time_str,
         'ts_sort':      ts_sort,
         'agent':        str(ec.get('agent_id', ''))[:8] or '—',
-        'to_masked':    '—',  # non disponibile in list response
-        'lead':         '—',
-        'azienda':      '—',
+        'to_masked':    '—',  # non disponibile in list response (merge disco riempie)
+        'lead':         '—',  # idem (merge disco riempie via conv_id)
+        'azienda':      '—',  # idem
+        'provincia':    '—',  # sess.1768 — merge disco riempie
+        'categoria':    '—',  # sess.1768 — merge disco riempie
+        'source':       '—',  # sess.1768 — merge disco riempie (apify/overpass/...)
         'duration_s':   dur,
         'status':       (ec.get('status') or '').lower() or '—',
         'outcome':      cs_label,
@@ -1955,6 +1958,25 @@ def voice_agents_feed() -> dict:
             dyn = rec.get('dynamic_vars') or {}
             azienda_str = str(dyn.get('NOME_AZIENDA') or '').strip()
 
+        # Provincia + categoria (sess.1768) — disponibili nei calls/*.json,
+        # erano già parse-able ma non esposti al render layer.
+        provincia_str = str(rec.get('provincia') or '').strip()
+        if not provincia_str:
+            dyn = rec.get('dynamic_vars') or {}
+            provincia_str = str(dyn.get('PROVINCIA') or '').strip()
+        categoria_str = str(rec.get('categoria') or '').strip()
+        if not categoria_str:
+            dyn = rec.get('dynamic_vars') or {}
+            categoria_str = str(dyn.get('CATEGORIA_AZIENDA') or '').strip()
+        # Source (sess.1768) — apify/overpass/playwright/manual; '—' se assente
+        source_str = str(rec.get('source') or '').strip()
+        if not source_str:
+            dyn = rec.get('dynamic_vars') or {}
+            source_str = str(dyn.get('LEAD_SOURCE') or '').strip()
+
+        # Conversation ID — chiave canonica per merge disco↔EL (sess.1768)
+        conv_id_str = str(rec.get('conversation_id') or rec.get('call_id') or '').strip()
+
         phone_field = rec.get('to_number') or rec.get('phone') or ''
         # Skip phone se è un user_xxx ID ElevenLabs (non un numero E.164)
         if isinstance(phone_field, str) and phone_field.startswith('user_'):
@@ -1974,6 +1996,10 @@ def voice_agents_feed() -> dict:
             'to_masked':    _voice_mask_phone(str(phone_field)),
             'lead':         (lead_str or '—')[:24],
             'azienda':      (azienda_str or '—')[:18],
+            'provincia':    provincia_str or '—',
+            'categoria':    (categoria_str or '—')[:24],
+            'source':       (source_str or '—')[:10],
+            'conversation_id': conv_id_str,
             'duration_s':   dur_int,
             'status':       outcome_raw or '—',
             'outcome':      cs_label,
@@ -1991,7 +2017,7 @@ def voice_agents_feed() -> dict:
             sent_buckets.setdefault(key, []).append(sent_val)
 
     calls_norm.sort(key=lambda c: c['ts_sort'], reverse=True)
-    recent_calls = calls_norm[:5]  # last 5 completed for "RECENT" panel
+    recent_calls = calls_norm[:50]  # sess.1760: vista estesa "TUTTE call" — era [:5]
 
     # ── sess.1758: GROUND TRUTH OVERRIDE da ElevenLabs API ────────────────────
     # I file calls/*.json perdono le call `failed`/`busy` (Twilio le termina
@@ -2054,18 +2080,36 @@ def voice_agents_feed() -> dict:
             # soli file disco — qui passiamo a EL ground truth).
             sent_buckets = el_sent_buckets
             # Override calls_norm: EL list è il record canonico (incluse
-            # failed/busy). Disco resta come anagrafica lead (lead/azienda)
-            # ma non come fonte conta. Match per conversation_id se disponibile.
-            disk_by_id = {}
-            for cn in calls_norm:
-                # calls_norm dal disco non ha conversation_id esplicito;
-                # cerco in raw originale via summary uniqueness — skip se
-                # non matchabile. Disco arricchisce solo come fallback.
-                pass
+            # failed/busy). Disco resta come anagrafica lead (lead/azienda/
+            # provincia/categoria/source) — match per conversation_id.
+            # sess.1768: merge implementato (era stub vuoto sess.1758).
+            disk_by_id = {
+                cn['conversation_id']: cn
+                for cn in calls_norm
+                if cn.get('conversation_id')
+            }
             calls_norm_el = [_voice_normalize_el_conv(ec) for ec in el_convs]
+            # Arricchimento: per ogni riga EL, se conv_id matcha record disco,
+            # propaga lead/azienda/provincia/categoria/source/to_masked.
+            for row in calls_norm_el:
+                cid = row.get('conversation_id') or ''
+                disk_rec = disk_by_id.get(cid)
+                if disk_rec:
+                    if disk_rec.get('lead') and disk_rec['lead'] != '—':
+                        row['lead'] = disk_rec['lead']
+                    if disk_rec.get('azienda') and disk_rec['azienda'] != '—':
+                        row['azienda'] = disk_rec['azienda']
+                    if disk_rec.get('provincia') and disk_rec['provincia'] != '—':
+                        row['provincia'] = disk_rec['provincia']
+                    if disk_rec.get('categoria') and disk_rec['categoria'] != '—':
+                        row['categoria'] = disk_rec['categoria']
+                    if disk_rec.get('source') and disk_rec['source'] != '—':
+                        row['source'] = disk_rec['source']
+                    if disk_rec.get('to_masked') and disk_rec['to_masked'] != '—':
+                        row['to_masked'] = disk_rec['to_masked']
             calls_norm_el.sort(key=lambda c: c['ts_sort'], reverse=True)
             calls_norm = calls_norm_el
-            recent_calls = calls_norm[:5]
+            recent_calls = calls_norm[:50]  # sess.1760: vista estesa "TUTTE call" — era [:5]
 
             # ── #8: in_flight EL-aware ────────────────────────────────────
             # Le conv EL `initiated` con start <90s sono call live davvero;

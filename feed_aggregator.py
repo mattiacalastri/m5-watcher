@@ -25,6 +25,8 @@ P1 'unavailable' e prosegue con le altre sorgenti. Mai solleva.
 
 from __future__ import annotations
 
+import json
+import pathlib
 import re
 import time
 from datetime import datetime
@@ -32,10 +34,25 @@ from typing import Any
 
 
 # ── Limits per sorgente (rispetta brief sess.1607) ───────────────────────────
-_LIMIT_TENTACOLI = 8
-_LIMIT_UNIFEED   = 5
-_LIMIT_TELEMETRY = 4
-_LIMIT_SENTINEL  = 5
+_LIMIT_TENTACOLI   = 8
+_LIMIT_UNIFEED     = 5
+_LIMIT_TELEMETRY   = 4
+_LIMIT_SENTINEL    = 5
+_LIMIT_GOVERNANCE  = 5  # sess.1762 — governance daemon signals
+_LIMIT_TGBOTS      = 5  # sess.1762 — polpo-tg-watcher recent[]
+_LIMIT_VOICEAGENTS = 5  # sess.1762 — voice agents events (DLQ + killswitch + live)
+
+# Governance daemon — severity mapping
+_GOV_SEV_P0 = {"critical", "high"}
+_GOV_SEV_P1 = {"medium"}
+
+# TG bots — severity mapping (polpo-tg-watcher schema)
+_TGBOT_SEV_P0 = {"high", "critical"}
+_TGBOT_SEV_P1 = {"medium"}
+
+# File paths — ground truth jsonl/state
+_GOV_PATH        = pathlib.Path.home() / ".local/run/governance_signals.jsonl"
+_TGBOT_STATE     = pathlib.Path.home() / ".local/run/polpo-tg-watcher/state.json"
 
 # Soglie telemetry
 _SLOW_P95_THRESHOLD_MS  = 500.0
@@ -449,6 +466,239 @@ def _aggregate_sentinel(app: Any) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Governance daemon (sess.1762) — ~/.local/run/governance_signals.jsonl
+# ─────────────────────────────────────────────────────────────────────────────
+def _aggregate_governance(app: Any) -> list[dict]:
+    """Tail jsonl governance daemon, rank per severity + value_eur."""
+    out: list[dict] = []
+    try:
+        if not _GOV_PATH.exists():
+            return []
+        with _GOV_PATH.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            chunk = min(size, 16384)
+            f.seek(size - chunk)
+            tail = f.read().decode("utf-8", errors="replace").splitlines()
+    except Exception as e:
+        return [_err_entry("Governance", "🛡️", e)]
+
+    ranked: list[tuple[int, dict]] = []
+    for line in tail[-30:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            a = json.loads(line)
+            sev_str = str(a.get("severity", "")).lower().strip()
+            if sev_str in _GOV_SEV_P0:
+                severity, rank = "P0", 0
+            elif sev_str in _GOV_SEV_P1:
+                severity, rank = "P1", 1
+            else:
+                severity, rank = "info", 2
+
+            ts_raw = str(a.get("ts", ""))
+            ts = ts_raw[11:19] if len(ts_raw) >= 19 else _now_hms()
+            if not re.match(r"^\d{2}:\d{2}:\d{2}$", ts):
+                ts = _now_hms()
+
+            signal_name = str(a.get("signal", "signal"))
+            value_eur   = a.get("value_eur") or 0
+            urgency     = a.get("urgency_days") or 0
+            try:
+                value_int = int(value_eur)
+            except Exception:
+                value_int = 0
+            try:
+                urg_int = int(urgency)
+            except Exception:
+                urg_int = 0
+
+            desc = f"€{value_int} · u={urg_int}d"
+            ranked.append((rank, {
+                "ts":       ts,
+                "severity": severity,
+                "emoji":    "🛡️",
+                "source":   "Governance",
+                "title":    _trunc(signal_name, 36),
+                "desc":     _trunc(desc, 60),
+                "is_new":   _is_recent(ts),
+            }))
+        except Exception:
+            continue
+
+    ranked.sort(key=lambda x: x[0])
+    for _, e in ranked[:_LIMIT_GOVERNANCE]:
+        out.append(e)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TG Bots (sess.1762) — ~/.local/run/polpo-tg-watcher/state.json::recent[]
+# ─────────────────────────────────────────────────────────────────────────────
+_RX_HTML_TAGS = re.compile(r"<[^>]+>")
+
+def _aggregate_tgbots(app: Any) -> list[dict]:
+    """Read polpo-tg-watcher state.json recent[] — bot/severity/preview."""
+    out: list[dict] = []
+    try:
+        if not _TGBOT_STATE.exists():
+            return []
+        data = json.loads(_TGBOT_STATE.read_text(encoding="utf-8"))
+    except Exception as e:
+        return [_err_entry("Bots", "📡", e)]
+
+    recent = data.get("recent", []) or []
+    ranked: list[tuple[int, dict]] = []
+    for r in recent[:30]:
+        try:
+            sev_str = str(r.get("severity", "")).lower().strip()
+            if sev_str in _TGBOT_SEV_P0:
+                severity, rank = "P0", 0
+            elif sev_str in _TGBOT_SEV_P1:
+                severity, rank = "P1", 1
+            else:
+                severity, rank = "info", 2
+
+            ts_raw = str(r.get("ts", ""))
+            ts = ts_raw[11:19] if len(ts_raw) >= 19 else _now_hms()
+            if not re.match(r"^\d{2}:\d{2}:\d{2}$", ts):
+                ts = _now_hms()
+
+            bot = str(r.get("bot", "?"))
+            src = str(r.get("src", ""))
+            preview_raw = str(r.get("preview", ""))
+            preview_clean = _RX_HTML_TAGS.sub("", preview_raw).split("\n")[0].strip()
+
+            ranked.append((rank, {
+                "ts":       ts,
+                "severity": severity,
+                "emoji":    "📡",
+                "source":   "Bots",
+                "title":    _trunc(f"{bot}/{src}" if src else bot, 36),
+                "desc":     _trunc(preview_clean, 60),
+                "is_new":   _is_recent(ts),
+            }))
+        except Exception:
+            continue
+
+    ranked.sort(key=lambda x: x[0])
+    for _, e in ranked[:_LIMIT_TGBOTS]:
+        out.append(e)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Voice Agents (sess.1762) — pull da app._voiceagents_data
+# Cicatrice madre sess.1758 (TUI counter disco cieco): leggiamo lo stesso dict
+# che voice_agents_feed() ha già aggregato — quando il dict guadagnerà ground
+# truth Twilio/EL API, questo aggregator beneficia gratis.
+# ─────────────────────────────────────────────────────────────────────────────
+def _aggregate_voiceagents(app: Any) -> list[dict]:
+    """Voice agent events: killswitch + DLQ + budget + live call."""
+    try:
+        vd = getattr(app, "_voiceagents_data", None) or {}
+    except Exception as e:
+        return [_err_entry("Voice", "☎️", e)]
+    if not isinstance(vd, dict) or not vd:
+        return []
+
+    out: list[dict] = []
+    ranked: list[tuple[int, dict]] = []
+    try:
+        # Killswitch P0
+        killed_by = str(vd.get("killed_by", "") or "").strip()
+        killed_at = str(vd.get("killed_at", "") or "").strip()
+        if killed_by:
+            ts = killed_at[11:19] if len(killed_at) >= 19 else _now_hms()
+            if not re.match(r"^\d{2}:\d{2}:\d{2}$", ts):
+                ts = _now_hms()
+            ranked.append((0, {
+                "ts":       ts,
+                "severity": "P0",
+                "emoji":    "☎️",
+                "source":   "Voice",
+                "title":    _trunc(f"KILLED by {killed_by}", 36),
+                "desc":     _trunc(f"setter disabled · {killed_at}", 60),
+                "is_new":   _is_recent(ts),
+            }))
+
+        # DLQ P1
+        dlq_count = vd.get("dlq_count", 0) or 0
+        try:
+            dlq_int = int(dlq_count)
+        except Exception:
+            dlq_int = 0
+        if dlq_int > 0:
+            sev = "P0" if dlq_int >= 5 else "P1"
+            r   = 0 if dlq_int >= 5 else 1
+            ranked.append((r, {
+                "ts":       _now_hms(),
+                "severity": sev,
+                "emoji":    "☎️",
+                "source":   "Voice",
+                "title":    _trunc(f"DLQ {dlq_int} call", 36),
+                "desc":     _trunc("dead letter queue non vuota", 60),
+                "is_new":   True,
+            }))
+
+        # Budget alert
+        budget_pct = vd.get("budget_pct", 0) or 0
+        try:
+            bp = float(budget_pct)
+        except Exception:
+            bp = 0.0
+        if bp >= 75:
+            sev, r = ("P0", 0) if bp >= 100 else ("P1", 1)
+            ranked.append((r, {
+                "ts":       _now_hms(),
+                "severity": sev,
+                "emoji":    "☎️",
+                "source":   "Voice",
+                "title":    _trunc(f"budget {bp:.0f}%", 36),
+                "desc":     _trunc("monthly cap close to hard stop", 60),
+                "is_new":   True,
+            }))
+
+        # Live call (info)
+        lc = vd.get("live_call") or {}
+        if isinstance(lc, dict) and lc.get("call_id"):
+            cid = str(lc.get("call_id", "?"))[:18]
+            status = str(lc.get("status", "?"))
+            ranked.append((2, {
+                "ts":       _now_hms(),
+                "severity": "info",
+                "emoji":    "☎️",
+                "source":   "Voice",
+                "title":    _trunc(f"LIVE {cid}", 36),
+                "desc":     _trunc(f"status={status}", 60),
+                "is_new":   True,
+            }))
+
+        # Errors collected by voice_agents_feed
+        errors = vd.get("errors") or []
+        if isinstance(errors, list):
+            for err in errors[:2]:
+                ranked.append((1, {
+                    "ts":       _now_hms(),
+                    "severity": "P1",
+                    "emoji":    "☎️",
+                    "source":   "Voice",
+                    "title":    _trunc("feed err", 36),
+                    "desc":     _trunc(str(err), 60),
+                    "is_new":   True,
+                }))
+    except Exception as e:
+        return [_err_entry("Voice", "☎️", e)]
+
+    ranked.sort(key=lambda x: x[0])
+    for _, e in ranked[:_LIMIT_VOICEAGENTS]:
+        out.append(e)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
 def aggregate_feed_events(app: Any) -> list[dict]:
@@ -467,10 +717,13 @@ def aggregate_feed_events(app: Any) -> list[dict]:
     entries: list[dict] = []
     # Ogni sorgente è già try/except internamente — questo è doppio anello
     for fn, source, emoji in (
-        (_aggregate_tentacoli, "Tentacoli", "🐙"),
-        (_aggregate_unifeed,   "UNIFEED",   "⚡"),
-        (_aggregate_telemetry, "Telemetry", "🔬"),
-        (_aggregate_sentinel,  "Sentinel",  "🛡"),
+        (_aggregate_tentacoli,   "Tentacoli",  "🐙"),
+        (_aggregate_unifeed,     "UNIFEED",    "⚡"),
+        (_aggregate_telemetry,   "Telemetry",  "🔬"),
+        (_aggregate_sentinel,    "Sentinel",   "🛡"),
+        (_aggregate_governance,  "Governance", "🛡️"),  # sess.1762
+        (_aggregate_tgbots,      "Bots",       "📡"),  # sess.1762
+        (_aggregate_voiceagents, "Voice",      "☎️"),  # sess.1762
     ):
         try:
             entries.extend(fn(app))

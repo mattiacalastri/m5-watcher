@@ -41,6 +41,7 @@ _LIMIT_SENTINEL    = 5
 _LIMIT_GOVERNANCE  = 5  # sess.1762 — governance daemon signals
 _LIMIT_TGBOTS      = 5  # sess.1762 — polpo-tg-watcher recent[]
 _LIMIT_VOICEAGENTS = 5  # sess.1762 — voice agents events (DLQ + killswitch + live)
+_LIMIT_RADAR       = 5  # sess.1777 — governance signals top-N nel feed
 
 # Governance daemon — severity mapping
 _GOV_SEV_P0 = {"critical", "high"}
@@ -699,6 +700,71 @@ def _aggregate_voiceagents(app: Any) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Radar 360 (sess.1777) — governance_signals.jsonl top signals nel Feed
+# ─────────────────────────────────────────────────────────────────────────────
+def _aggregate_radar(app: Any) -> list[dict]:
+    """Top governance signals (ultime 24h) come entries Feed normalizzate.
+
+    Usa radar_widget._read_signals_24h() come sorgente canonica.
+    Serve SOLO a iniettare segnali Radar nel tab Feed come cross-source.
+    La visualizzazione ricca sta nel tab Radar dedicato (radar_widget.render_radar).
+
+    Severity mapping: critical→P0, high→P0, medium→P1, low→info.
+    """
+    out: list[dict] = []
+    try:
+        from radar_widget import _read_signals_24h, _signal_category, _sev_color  # type: ignore
+        signals = _read_signals_24h()
+        if not signals:
+            return []
+    except Exception as e:
+        return [_err_entry("Radar", "🔴", e)]
+
+    _SEV_TO_FEED = {"critical": "P0", "high": "P0", "medium": "P1", "low": "info"}
+    _SEV_RANK    = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+    ranked: list[tuple[int, dict]] = []
+    for s in signals:
+        try:
+            sev_str = str(s.get("severity", "low")).lower().strip()
+            if sev_str not in _SEV_RANK:
+                sev_str = "low"
+            severity = _SEV_TO_FEED.get(sev_str, "info")
+            rank     = _SEV_RANK.get(sev_str, 9)
+
+            sig_name = str(s.get("signal", "?"))
+            cat      = _signal_category(sig_name)
+            val_eur  = int(s.get("value_eur") or 0)
+            urg      = int(s.get("urgency_days") or 0)
+
+            ts_raw = str(s.get("ts", ""))
+            ts = ts_raw[11:19] if len(ts_raw) >= 19 else _now_hms()
+            if not re.match(r"^\d{2}:\d{2}:\d{2}$", ts):
+                ts = _now_hms()
+
+            val_str = f"€{val_eur:,}".replace(",", ".") if val_eur else ""
+            urg_str = f"u={urg}d" if urg else ""
+            desc_parts = [p for p in [cat, val_str, urg_str] if p]
+
+            ranked.append((rank, {
+                "ts":       ts,
+                "severity": severity,
+                "emoji":    "🔴" if sev_str == "critical" else ("🟡" if sev_str in ("high", "medium") else "⚪"),
+                "source":   "Radar",
+                "title":    _trunc(sig_name, 36),
+                "desc":     _trunc(" · ".join(desc_parts), 60),
+                "is_new":   _is_recent(ts),
+            }))
+        except Exception:
+            continue
+
+    ranked.sort(key=lambda x: x[0])
+    for _, e in ranked[:_LIMIT_RADAR]:
+        out.append(e)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
 def aggregate_feed_events(app: Any) -> list[dict]:
@@ -724,6 +790,7 @@ def aggregate_feed_events(app: Any) -> list[dict]:
         (_aggregate_governance,  "Governance", "🛡️"),  # sess.1762
         (_aggregate_tgbots,      "Bots",       "📡"),  # sess.1762
         (_aggregate_voiceagents, "Voice",      "☎️"),  # sess.1762
+        (_aggregate_radar,       "Radar",      "🔴"),  # sess.1777
     ):
         try:
             entries.extend(fn(app))

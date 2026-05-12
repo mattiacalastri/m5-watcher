@@ -116,6 +116,14 @@ except Exception as _feed_imp_err:
     def populate_blocks_table(*a, **kw): pass
     def aggregate_feed_events(app): return []
 
+# sess.1777: Radar 360 widget — governance intelligence panel
+try:
+    import radar_widget as _radar_widget
+    _RADAR_OK = True
+except Exception as _radar_imp_err:
+    _RADAR_OK = False
+    logger.warning("sess.1777 radar_widget not available: %s", _radar_imp_err)
+
 # ── Design tokens ──────────────────────────────────────────────────────────────
 _TOKENS = json.loads((Path(__file__).parent / "polpo.tokens.json").read_text())
 P = _TOKENS["palette"]
@@ -2046,6 +2054,7 @@ class M5Watcher(App):
         Binding("8",   "show_tab_sent",  "🛡",       show=True),
         Binding("9",   "show_tab_voiceagents", "☎️",  show=True),
         Binding("v",   "show_tab_voiceagents", "Voice", show=False),
+        Binding("0",   "show_tab_radar",  "Radar",    show=True),   # sess.1777
         Binding("d",   "show_tab_debug", "🔬",       show=True),
         # Actions cluster
         Binding("f",   "cycle_graph_filter", "│ Filter", show=True),
@@ -2090,6 +2099,8 @@ class M5Watcher(App):
         self._sentinel_data:    dict                   = {}
         # sess.1602: voice agents telemetry feed cache (refresh slow tick)
         self._voiceagents_data: dict                   = {}
+        # sess.1777: Radar 360 — governance signals cache (refresh slow tick)
+        self._radar_signals:    list                   = []
         # sess.1683: flag anti-stack boost timer per LIVE CALL accelerator (5s→2s).
         self._live_call_boost_pending: bool            = False
         # Responsive layout — updated on terminal resize
@@ -2265,6 +2276,15 @@ class M5Watcher(App):
                             f"[red]TG Bots widget non caricato: {_tg_err}[/red]\n"
                             f"[dim]Verifica: python3 ~/projects/m5-watcher/tg_bots_widget.py[/dim]",
                             id="tgbots-feed")
+            # sess.1777: Radar 360 — Business Governance Intelligence panel
+            with TabPane("Radar", id="tab-radar"):
+                with ScrollableContainer(id="radar-scroll"):
+                    yield Static(
+                        f"[bold {ELEC_BLUE}]RADAR 360[/]  "
+                        f"[{DIM}]· governance intelligence · caricamento...[/]",
+                        id="radar-static",
+                        markup=True,
+                    )
             # sess.1508 round 4: telemetry spine — claim verifiability live.
             with TabPane("🔬 Debug", id="tab-debug"):
                 with ScrollableContainer(id="debug-scroll"):
@@ -2472,7 +2492,7 @@ class M5Watcher(App):
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         # sess.1607: tab-logs (label "📋 Feed") — id storico mantenuto per compat shortcut + state.
-        fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent", "tab-debug"}
+        fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent", "tab-debug", "tab-radar"}
         hide = event.pane is not None and event.pane.id in fullscreen_tabs
         self.query_one("#top-row").display = not hide
         # sess.1541: lazy render → la nuova tab era saltata dall'ultimo
@@ -2867,7 +2887,8 @@ class M5Watcher(App):
         except Exception:
             _active_tab = None
         # sess.1607: tab-logs (label "📋 Feed") — id storico mantenuto per compat.
-        _fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent", "tab-debug", "tab-voiceagents"}
+        # sess.1777: tab-radar aggiunto a fullscreen (nasconde top-row CPU/mem)
+        _fullscreen_tabs = {"tab-logs", "tab-sent", "tab-procs", "tab-tent", "tab-debug", "tab-voiceagents", "tab-radar"}
         _top_row_visible = _active_tab not in _fullscreen_tabs
 
         # mem-content vive in #top-row → render solo se top-row visibile.
@@ -2900,6 +2921,10 @@ class M5Watcher(App):
             self._render_sentinel(self._sentinel_data)
         if _active_tab == "tab-voiceagents":
             self._update_voice_agents_table(self._voiceagents_data)
+
+        # sess.1777: Radar 360 — lazy render (solo tab-radar attivo)
+        if _active_tab == "tab-radar":
+            self._refresh_radar()
 
         # sess.1534 round 4-6: roadmap-aware strip refresh (6 moduli).
         # Cold timings: vector ~240ms, trap ~310ms, others <10ms.
@@ -3252,6 +3277,45 @@ class M5Watcher(App):
             self._update_voice_agents_table(self._voiceagents_data)
         except Exception as e:
             self._py_logger.exception("voice agents render fail: %s", e)
+
+    # ── sess.1777: Radar 360 ─────────────────────────────────────────────────
+
+    def action_show_tab_radar(self) -> None:
+        """Tab Radar 360 — governance intelligence (sess.1777)."""
+        self.query_one(TabbedContent).active = "tab-radar"
+        n_sigs = len(self._radar_signals)
+        # Render immediato senza aspettare next tick slow
+        self._refresh_radar()
+        self.notify(
+            f"Radar 360  ·  {n_sigs} segnali 24h",
+            timeout=2.0,
+        )
+
+    def _refresh_radar(self) -> None:
+        """Rilegge governance_signals.jsonl e aggiorna #radar-static.
+
+        Defensive: eccezione interna → messaggio di errore nel widget, non
+        propaga. Mai solleva. Rispetta cicatrice sess.1777 (verità dati > estetica).
+        """
+        if not _RADAR_OK:
+            self._update_if_changed(
+                "radar-static",
+                f"[red]radar_widget non disponibile — verifica install[/red]",
+            )
+            return
+        try:
+            self._radar_signals = _radar_widget._read_signals_24h()
+            markup = _radar_widget.render_radar(self._radar_signals)
+            self._update_if_changed("radar-static", markup)
+        except Exception as e:
+            self._py_logger.exception("radar refresh fail: %s", e)
+            try:
+                self._update_if_changed(
+                    "radar-static",
+                    f"[red]Radar errore: {e}[/red]",
+                )
+            except Exception:
+                pass
 
     def _render_voice_live_call(self, data: dict) -> None:
         """Render `voiceagents-live-call` widget — 3 casi (sess.1683).

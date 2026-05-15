@@ -44,3 +44,6 @@ graphify-out/
 # Session backup files (sess.1605, sess.1607)
 *.bak.sess*
 *.bak.*.feed_tab
+
+# Backup directory (runtime snapshots)
+backups/

@@ -30,3 +30,11 @@ Watcher preventivo (real-time TUI Textual) — differente da `crash-checker` age
 - **Doc**: `CHANGELOG.md`, `README.md`, `WAR_ROOM_DESIGN_PLAN.md`
 - **Backup storici preservati**: `app.py.bak.20260506_205836`, `app.py.bak.20260507_005738`, `app.py.bak.sess1605`, `app.py.bak.sess1607.feed_tab`, `app.py.bak.sess1745`, `app.py.bak.sess1777` — pattern conservativo (7 backup, non eliminare senza audit)
 - **Last commit**: `9d4465c feat(feed): tg_bots_widget refactor + polpo_heartbeat + test sync sess.1768`
+
+## Doctrine sess.1893 — Heatmap timeline tunable
+
+- Introduzione costante `HEATMAP_DT_S` (default `1.0`) come single knob per modificare velocità timeline heatmap. Era hardcoded `2.0` in 4 punti diversi. Cambia solo line 209 in app.py.
+- Effetto: a `HEATMAP_DT_S = 1.0` (default attuale) frame rate doppio rispetto a precedente, window heatmap 44s a cols=44 (era 88s). `tick_every` axis label auto-aggiornato via `round(20 / HEATMAP_DT_S)` per mantenere ~20s spacing.
+- **Pre-flight obbligatorio post-edit `app.py`**: `python3 -c "import ast; ast.parse(open('app.py').read())"`. Cicatrice 13 Mag 2026: il backup `app.py.bak.sess1895` (now in `backups/`) era SyntaxError ma nessun verify post-write l'ha smascherato fino a 7gg dopo. AST verify e single-line, costo zero, blocca regressioni.
+- **Cicatrice immune system hook**: `pre_tool_check.py` puo alzare THREAT 10 EMERGENCY MODE su pattern grep contenenti glyph unicode non-ASCII (es. greek delta). Workaround: scrivere `[Dd]elta` o `dt=` invece di glyph greek in pattern di ricerca. De-escalation automatica 10min senza alert.
+- **Backup audit pattern**: `*.bak.sess*` in root vanno spostati in `backups/` con suffisso `.BROKEN.txt` se contengono SyntaxError. README.md in `backups/` documenta ogni archivio.

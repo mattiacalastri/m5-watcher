@@ -5,6 +5,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 
 ---
 
+## [Unreleased] — sess.1893 · 2026-05-13 · Heatmap timeline tunable
+
+### Added
+- **`HEATMAP_DT_S` constant** (app.py line 209) — single knob module-level per modificare velocità timeline CPU heatmap. Era `2.0` hardcoded in 4 punti diversi. Default `1.0` (frame rate 2× più fluido, window 44s @ cols=44, era 88s).
+
+### Changed
+- **`render_heatmap`** (line 434-441) — `tick_every` e `total_secs` e `secs_ago` ora derivati da `HEATMAP_DT_S` invece di `2` hardcoded. `tick_every = max(1, int(round(20 / HEATMAP_DT_S)))` mantiene ~20s spacing label a qualunque Δt.
+- **Label header heatmap** (line 450) — f-string dinamico `Δt={HEATMAP_DT_S:g}s · window={total_secs}s`.
+- **`set_interval(_refresh_fast)`** (line 2627) — ora usa `HEATMAP_DT_S` invece di `2.0`. Sampling + redraw allineati.
+
+### Hygiene
+- **`app.py.bak.sess1895` archived** — backup syntactically broken (leftover "Backup, poi applico A + B." in line 1 davanti al docstring → SyntaxError). Spostato in `backups/app.py.bak.sess1895.BROKEN.txt` per evitare confusione futura. Vedi `backups/README.md`.
+
+### Doctrine
+- **AST verify obbligatorio post-edit `app.py`** — single-line python3 ast.parse check, blocca regressioni come quella sess.1895 → backup rotto undetected per 7gg.
+- **Hook EMERGENCY false-positive su glyph greek** — `pre_tool_check.py` può alzare THREAT 10 su pattern grep contenenti char unicode esotici (es. `Δ`). Workaround documentato in CLAUDE.md.
+- **Backup audit pattern** — `*.bak.sess*` rotti in root → `backups/` con suffisso `.BROKEN.txt` + entry in `backups/README.md`.
+
+---
+
+## [Unreleased] — sess.1895 · 2026-05-13 · Design System Harmonization + Self-Improvement Loop
+
+### Added
+- **Command palette** (`Ctrl+\`) — `TabSearchProvider` fuzzy search dei 14 tab (inclusi plugin), scala oltre footer shortcut.
+- **Adaptive refresh** — idle >30s rallenta `_refresh_fast`/`_refresh_slow` 4× (CPU saving). Re-attiva immediatamente al primo `on_key`.
+- **SVG snapshot** (`Shift+S` → `action_snapshot_svg`) — Textual `save_screenshot` in `~/.m5-watcher/snapshots/`. Base per future TG bridge.
+- **Web companion** (`serve_web.py` + `serve_web.sh`) — textual-serve 1.1.3, espone TUI su `http://localhost:8780` o LAN (iPhone/iPad accessibile).
+- **Plugin tab template** (`templates/new_tab_template.py`) — schema canonico per nuovi tab.
+- **Tab-box lint** (`scripts/lint_tab_boxes.py`) — verifica 17/17 ScrollableContainer hanno border heavy + design-system drift check (padding/height variants).
+- **R2: advisor tab in command palette** — `🤖 Advisor · Claude Haiku verdict` ora reachable via Ctrl+\\.
+
+### Changed
+- **Design tokens da `polpo.tokens.json`** — energy palette (LIME/HOT_PINK/ELEC_BLUE/ORANGE/DEEP_PURPL/SOFT_GREEN/WHITE) letta da JSON single-source-of-truth invece di hardcoded Python costanti. Cross-tool consistency (Astra report, AuraHome).
+- **Box border harmonization** — 11 occorrenze `border: heavy {COLOR}` → `border: heavy {TEAL}` (Polpo identity canonical). 17 container ora tutti TEAL uniformi. Semantic color preservato in `border-title-color`.
+- **Box mancanti aggiunti** — `#radar-scroll` + `#tgbots-scroll` precedentemente senza CSS border (box invisibili).
+- **Default tab** — rimossa forzatura `tab-kpi` (sess.1508 round 2 revert), default torna a Heatmap (primo TabPane Textual natural).
+- **Scroll home su KPI activation** — `scroll_home(animate=False)` su `#kpi-scroll` quando attivato, fix scroll-bottom percepito al boot.
+
+### Cleanup
+- 8 backup `.bak` archiviati in `backups/` subdir, solo most-recent `app.py.bak.sess1895` in root.
+
+---
+
 ## [Unreleased] — sess.1694 · 2026-05-08 · Agentic Advisor (plugin #1)
 
 ### Added

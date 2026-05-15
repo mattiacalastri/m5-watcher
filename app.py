@@ -69,6 +69,7 @@ from statistics import mean
 import psutil
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.command import Hit, Hits, Provider
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.reactive import reactive
 from textual.screen import ModalScreen
@@ -133,13 +134,17 @@ GREEN, YELLOW, RED   = P["polpo_green"], P["polpo_yellow"], P["polpo_red"]
 FG, MAG, CYAN, SCAR  = P["polpo_fg"], P["polpo_magenta"], P["polpo_cyan"], P["polpo_scar"]
 
 # ── Energy boost palette (data viz hierarchy) ─────────────────────────────────
-WHITE      = "#ffffff"   # critical headlines / super-bright peak
-LIME       = "#a8ff60"   # alive/healthy/energy positive
-ELEC_BLUE  = "#00e5ff"   # electric accent / live data flow
-HOT_PINK   = "#ff2d92"   # attention magenta / spike alert
-ORANGE     = "#ff8a3d"   # warm warning / heat
-DEEP_PURPL = "#9d4dff"   # P-cluster signature (performance)
-SOFT_GREEN = "#5dffaa"   # S-cluster signature (efficiency)
+# sess.1895: letto da polpo.tokens.json (single source of truth cross-tool —
+# Astra report, AuraHome, m5-watcher condividono palette). Fallback hardcoded
+# se chiavi mancanti per backward compat.
+_E = _TOKENS.get("energy_palette", {})
+WHITE      = _E.get("white",       "#ffffff")  # critical headlines / super-bright peak
+LIME       = _E.get("lime",        "#a8ff60")  # alive/healthy/energy positive
+ELEC_BLUE  = _E.get("elec_blue",   "#00e5ff")  # electric accent / live data flow
+HOT_PINK   = _E.get("hot_pink",    "#ff2d92")  # attention magenta / spike alert
+ORANGE     = _E.get("orange",      "#ff8a3d")  # warm warning / heat
+DEEP_PURPL = _E.get("deep_purple", "#9d4dff")  # P-cluster signature (performance)
+SOFT_GREEN = _E.get("soft_green",  "#5dffaa")  # S-cluster signature (efficiency)
 
 _UNIFEED_HDR = f"[bold {ORANGE}]⚡ UNIFEED[/]  [dim]· M5 Max events[/]"
 
@@ -199,6 +204,9 @@ HEAT_MAP = [           # (char, color) by intensity 0-7
 
 TREND_WINDOW = 6
 N_CORES = ds.E_CORES + ds.P_CORES   # 18
+# sess.1893: heatmap sample/redraw interval. Era hardcoded 2.0s ovunque.
+# Lower = più fluido + window heatmap dimezzata (44s @ 1.0s, 88s @ 2.0s con cols=44).
+HEATMAP_DT_S = 1.0
 JARVIS_DIR = Path.home() / ".local" / "run" / "jarvis"
 
 # sess.1508 round 3: rimosso `_VOICE_NAMES` dict — duplicava la lista voci
@@ -423,13 +431,14 @@ def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str
     volte) e legenda allineata con i nuovi 8 glyph distinti.
     Round 2: deque slice via itertools.islice (no GC pressure).
     """
-    tick_every = 10   # mark every 10 cols = 20 s
-    total_secs = cols * 2
+    # sess.1893: tick_every dinamico → mantiene ~20s spacing label a qualunque Δt.
+    tick_every = max(1, int(round(20 / HEATMAP_DT_S)))
+    total_secs = int(cols * HEATMAP_DT_S)
 
     # Time axis — single pass
     axis_chars = list(' ' * (cols + 6))
     for i in range(0, cols, tick_every):
-        secs_ago = (cols - i) * 2
+        secs_ago = int((cols - i) * HEATMAP_DT_S)
         label = f'{secs_ago}s'
         for j, c in enumerate(label):
             if i + 6 + j < len(axis_chars):
@@ -438,7 +447,7 @@ def render_heatmap(core_history: dict[int, deque[float]], cols: int = 44) -> str
 
     lines = [
         "",
-        f"[bold {ORANGE}]🔥 CPU HEATMAP[/]  [{DIM}]Δt=2s · window={total_secs}s[/]  "
+        f"[bold {ORANGE}]🔥 CPU HEATMAP[/]  [{DIM}]Δt={HEATMAP_DT_S:g}s · window={total_secs}s[/]  "
         f"[{DIM}]·░[/]<25  [{CYAN}]▒[/][{TEAL}]▓[/]25-50  "
         f"[{YELLOW}]▚[/][{SCAR}]▞[/]50-75  [{RED}]▣[/][{MAG}]█[/]>75",
         f"[italic {DIM}]The memory of work, rendered as heat — time scrolls left, intensity blooms hot.[/]",
@@ -1692,12 +1701,59 @@ class TriageScreen(ModalScreen):
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
+# sess.1895: Command palette provider — Ctrl+\ apre fuzzy search dei tab.
+# Risolve scale problem (13 tab + crescita futura → footer shortcut satura).
+class TabSearchProvider(Provider):
+    """Fuzzy search per i TabPane di m5-watcher. Trigger: Ctrl+\\ (Cmd+P su Mac)."""
+
+    TABS: tuple[tuple[str, str], ...] = (
+        ("🌡 Heatmap",       "tab-heat"),
+        ("📈 Analytics",     "tab-stats"),
+        ("🔝 Processes",     "tab-procs"),
+        ("🐙 Tentacoli",     "tab-tent"),
+        ("🕸 Graph",          "tab-graph"),
+        ("📊 KPI · MRR · Outstanding · Pipeline", "tab-kpi"),
+        ("🩺 Health · vitals", "tab-health"),
+        ("📋 Feed · logs · outstanding · trap", "tab-logs"),
+        ("🛡 Sentinel · security", "tab-sent"),
+        ("☎️ Voice Agents · Andrea GEO", "tab-voiceagents"),
+        ("📡 Bots · Telegram Squad", "tab-tgbots"),
+        ("📡 Radar · governance signals", "tab-radar"),
+        ("🔬 Debug · telemetry", "tab-debug"),
+        ("🤖 Advisor · Claude Haiku verdict", "tab-advisor"),  # sess.1895 R2: plugin tab
+    )
+
+    async def search(self, query: str) -> Hits:
+        matcher = self.matcher(query)
+        app = self.app
+        for label, tab_id in self.TABS:
+            score = matcher.match(label)
+            if score > 0:
+                yield Hit(
+                    score,
+                    matcher.highlight(label),
+                    lambda tid=tab_id: _activate_tab(app, tid),
+                    help=f"Switch to {label}",
+                )
+
+
+def _activate_tab(app, tab_id: str) -> None:
+    """Helper standalone — evita lambda closure leak su Provider."""
+    try:
+        app.query_one(TabbedContent).active = tab_id
+    except Exception:
+        pass
+
+
 class M5Watcher(App):
     """🐙 M5 MAX WATCHER · Astra Digital Marketing · Polpo Cockpit Suite
 
     Real-time analytics TUI for Apple M5 Max. See module docstring for full spec.
     Forged sess.1238 · v2.0.0 · 2026-05-02 · Polpo Data Viz Edition.
     """
+
+    # sess.1895: registra command palette provider (Ctrl+\\ default Textual)
+    COMMANDS = App.COMMANDS | {TabSearchProvider}
 
     TITLE     = f"🐙 {__title__}"
     SUB_TITLE = f"v{__version__} · Apple M5 Max · 18C (6S+12P) · 36GB Unified · {__company__}"
@@ -1752,7 +1808,7 @@ class M5Watcher(App):
         padding: 1 3;
         margin: 0;
         background: {BG_ALT};
-        border: heavy {ORANGE};
+        border: heavy {TEAL};
         border-title-color: {ORANGE};
         border-title-style: bold;
         overflow-y: auto;
@@ -1832,7 +1888,7 @@ class M5Watcher(App):
     #voice-static {{
         width: 1fr;
         background: {BG_ALT};
-        border: heavy {HOT_PINK};
+        border: heavy {TEAL};
         border-title-color: {HOT_PINK};
         padding: 1 3;
         height: 1fr;
@@ -1858,7 +1914,7 @@ class M5Watcher(App):
     }}
     #kpi-scroll {{
         background: {BG_ALT};
-        border: heavy {LIME};
+        border: heavy {TEAL};
         border-title-color: {LIME};
         padding: 1 3;
         height: 1fr;
@@ -1869,7 +1925,7 @@ class M5Watcher(App):
     }}
     #health-scroll {{
         background: {BG_ALT};
-        border: heavy {LIME};
+        border: heavy {TEAL};
         border-title-color: {LIME};
         padding: 1 3;
         height: 1fr;
@@ -1880,7 +1936,7 @@ class M5Watcher(App):
     }}
     #logs-scroll {{
         background: {BG_ALT};
-        border: heavy {ORANGE};
+        border: heavy {TEAL};
         border-title-color: {ORANGE};
         padding: 1 3;
         height: 1fr;
@@ -1892,14 +1948,14 @@ class M5Watcher(App):
     }}
     #canary-panel {{
         background: {BG_ALT};
-        border: heavy {HOT_PINK};
+        border: heavy {TEAL};
         padding: 1 2;
         width: 1fr;
         height: 1fr;
     }}
     #alerts-panel {{
         background: {BG_ALT};
-        border: heavy {ELEC_BLUE};
+        border: heavy {TEAL};
         padding: 1 2;
         width: 2fr;
         height: 1fr;
@@ -1928,7 +1984,7 @@ class M5Watcher(App):
     /* sess.1602: Voice Agents tab — HOT_PINK frame perché è la voce di Astra. */
     #voiceagents-scroll {{
         background: {BG_ALT};
-        border: heavy {HOT_PINK};
+        border: heavy {TEAL};
         border-title-color: {HOT_PINK};
         padding: 1 3;
         height: 1fr;
@@ -2002,7 +2058,7 @@ class M5Watcher(App):
     }}
     #procs-box {{
         background: {BG_ALT};
-        border: heavy {ELEC_BLUE};
+        border: heavy {TEAL};
         padding: 1 3;
         height: 1fr;
         overflow-x: hidden;
@@ -2010,7 +2066,7 @@ class M5Watcher(App):
     }}
     #tent-box {{
         background: {BG_ALT};
-        border: heavy {HOT_PINK};
+        border: heavy {TEAL};
         padding: 1 3;
         height: 1fr;
     }}
@@ -2026,8 +2082,24 @@ class M5Watcher(App):
        per coerenza con P-cluster signature (telemetria performance). */
     #debug-scroll {{
         background: {BG_ALT};
-        border: heavy {DEEP_PURPL};
+        border: heavy {TEAL};
         padding: 1 2;
+        height: 1fr;
+    }}
+    /* sess.1895: box mancanti per Radar + TG Bots — armonizzazione cross-tab
+       (border heavy TEAL canonico Polpo identity). */
+    #radar-scroll {{
+        background: {BG_ALT};
+        border: heavy {TEAL};
+        border-title-color: {ELEC_BLUE};
+        padding: 1 3;
+        height: 1fr;
+    }}
+    #tgbots-scroll {{
+        background: {BG_ALT};
+        border: heavy {TEAL};
+        border-title-color: {ELEC_BLUE};
+        padding: 1 3;
         height: 1fr;
     }}
     """
@@ -2061,6 +2133,7 @@ class M5Watcher(App):
         Binding("c",   "triage",             "Triage",   show=True),
         Binding("k",   "kill_tent_selected", "Kill",     show=True),
         Binding("s",   "snapshot",           "📸 Snap",  show=True),
+        Binding("S",   "snapshot_svg",       "🖼 SVG",   show=True),  # sess.1895: SVG visual export
         # Help cluster
         Binding("?",   "show_help",          "│ Help",   show=True),
     ]
@@ -2079,6 +2152,12 @@ class M5Watcher(App):
         }
         self._paused = False
         self._tick   = 0
+        # sess.1895: adaptive refresh — dopo 30s no-input rallenta 4×
+        # (fast 2s → 8s effective, slow 5s → 20s effective). Risparmio CPU
+        # quando m5-watcher è in background o utente assente. Si riattiva
+        # immediatamente al primo tasto (on_key).
+        self._last_input_at = time.monotonic()
+        self._idle_skip_counter = 0
         self._graph_data:   dict = {}
         self._graph_filter: str  = "all"
         # Header rich-info cache
@@ -2503,6 +2582,13 @@ class M5Watcher(App):
             self.run_worker(self._refresh_slow(), exclusive=False, group="slow_refresh")
         except Exception:
             pass
+        # sess.1895: scroll_home su tab-kpi → fix scroll bottom percepito
+        # quando kpi-static cresce da loading stub (1 riga) a render ~28 righe.
+        if event.pane is not None and event.pane.id == "tab-kpi":
+            try:
+                self.query_one("#kpi-scroll").scroll_home(animate=False)
+            except Exception:
+                pass
         # sess.1539: TitleBar UNIFORME cross-tab — rimosso lo shrink per-tab
         # (prima collassava a 6 righe su Heatmap/Logs/Procs/Tent/Debug).
         # Sizing ora deciso solo da on_resize (cols/rows-based): l'header è
@@ -2531,16 +2617,14 @@ class M5Watcher(App):
         # Seed disk/net deltas
         await asyncio.to_thread(ds.disk_io_rate)
         await asyncio.to_thread(ds.net_io_rate)
-        # sess.1508 round 2 hierarchy fix: KPI è il dato decision-driving
-        # (MRR, Outstanding, Pipeline) → default tab al posto di Heatmap
-        # decorativa. Top-of-fold finanziario.
-        try:
-            self.query_one(TabbedContent).active = "tab-kpi"
-        except Exception:
-            pass
+        # sess.1895 revert: default tab torna a Heatmap (primo TabPane).
+        # La forzatura tab-kpi (sess.1508 round 2) creava drift visivo +
+        # scroll bottom percepito al boot. Heatmap è default Textual naturale.
+        # KPI resta accessibile via shortcut "6" (linea 2052).
         # Sfasamento set_interval per evitare allineamento ogni 10s che
         # bursta tutti i widget update insieme (audit perf round 2).
-        self.set_interval(2.0, self._refresh_fast)
+        # sess.1893: _refresh_fast usa HEATMAP_DT_S (default 1.0s) per timeline fluida.
+        self.set_interval(HEATMAP_DT_S, self._refresh_fast)
         await asyncio.sleep(0.3)
         self.set_interval(5.0, self._refresh_slow)
         # sess.1508 round 4: telemetry spine intervals
@@ -2677,8 +2761,24 @@ class M5Watcher(App):
             self._py_logger.exception("_update_if_changed widget=%s fail: %s", widget_id, e)
 
     # ── Refresh ───────────────────────────────────────────────────────────────
+    def _should_skip_idle(self) -> bool:
+        """sess.1895: True se idle >30s e tick non è il 4° (skip 3/4 idle).
+        Re-attiva immediatamente al primo tasto via on_key().
+        """
+        if time.monotonic() - self._last_input_at < 30.0:
+            self._idle_skip_counter = 0
+            return False
+        self._idle_skip_counter = (self._idle_skip_counter + 1) % 4
+        return self._idle_skip_counter != 0
+
+    def on_key(self, event) -> None:  # noqa: ARG002 — Textual event hook
+        """sess.1895: aggiorna timestamp per uscire dall'idle slowdown."""
+        self._last_input_at = time.monotonic()
+
     async def _refresh_fast(self) -> None:
         if self._paused:
+            return
+        if self._should_skip_idle():
             return
         # sess.1508 round 4 telemetry: misura frame_ms (claim verifiability).
         _t_start = time.perf_counter()
@@ -2785,6 +2885,8 @@ class M5Watcher(App):
 
     async def _refresh_slow(self) -> None:
         if self._paused:
+            return
+        if self._should_skip_idle():
             return
         _t_slow = time.perf_counter()
         # sess.1568b code-review fix: return_exceptions=True isola data-source failures.
@@ -4035,6 +4137,28 @@ class M5Watcher(App):
         except Exception as e:
             self._py_logger.exception("action_snapshot fail: %s", e)
             self.notify(f"📸 errore snapshot: {e}", severity="error", timeout=3.0)
+
+    async def action_snapshot_svg(self) -> None:
+        """sess.1895: snapshot visivo SVG in ~/.m5-watcher/snapshots/.
+        Base per TG bridge futuro (`/m5 image` invia ultimo SVG su Telegram).
+        Textual `save_screenshot` ritorna percorso file salvato.
+        """
+        ts = time.strftime("%Y%m%dT%H%M%S")
+        snap_dir = Path.home() / ".m5-watcher" / "snapshots"
+        try:
+            snap_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.notify(f"🖼 mkdir fail: {e}", severity="error", timeout=3.0)
+            return
+        filename = f"m5w_{ts}.svg"
+        try:
+            # Textual save_screenshot: filename + path = directory
+            path = self.save_screenshot(filename=filename, path=str(snap_dir))
+            self.notify(f"🖼 SVG → {Path(path).name}", severity="information", timeout=3.0)
+            self._py_logger.info("svg snapshot: %s", path)
+        except Exception as e:
+            self._py_logger.exception("action_snapshot_svg fail: %s", e)
+            self.notify(f"🖼 errore SVG: {e}", severity="error", timeout=3.0)
 
     def action_triage(self) -> None:
         self.push_screen(TriageScreen())

@@ -2634,6 +2634,15 @@ class M5Watcher(App):
         # Immediate initial load — all panels (incl. Graph + KPI) visible on startup
         await self._refresh_fast()
         await self._refresh_slow()
+        # sess.1988: Screen overflow auto + min-height 30+30 forza scroll quando
+        # la finestra Ghostty parte piccola. Il focus iniziale sull'active TabPane
+        # scrolla via la TitleBar. Forza scroll_home dopo il primo paint.
+        def _pin_top() -> None:
+            try:
+                self.screen.scroll_home(animate=False)
+            except Exception:
+                pass
+        self.call_after_refresh(_pin_top)
         # sess.1534 round 4: pre-warm cache dei 5 moduli roadmap in background.
         # vector + trap fanno I/O caro (~500ms) — facciamoli mentre il KPI tab
         # è visibile, così non bloccano il primo switch a tab Logs.
